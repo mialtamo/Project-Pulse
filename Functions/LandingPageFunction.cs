@@ -10,8 +10,18 @@ public sealed class LandingPageFunction
 {
     [Function("PulseLandingPage")]
     public async Task<HttpResponseData> Run(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse")] HttpRequestData request)
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "{*path}")]
+        HttpRequestData request,
+        string? path)
     {
+        var normalizedPath = (path ?? string.Empty).Trim('/');
+
+        if (!string.IsNullOrEmpty(normalizedPath) &&
+            !normalizedPath.Equals("pulse", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.CreateResponse(HttpStatusCode.NotFound);
+        }
+
         var version = WebUtility.HtmlEncode(
             Environment.GetEnvironmentVariable("PROJECT_PULSE_VERSION") ?? "0.0.0");
 
@@ -158,7 +168,12 @@ public sealed class LandingPageFunction
             right: 0;
             height: 1px;
             top: -2px;
-            background: linear-gradient(90deg, transparent 10%, rgba(25, 221, 255, .22), rgba(138, 77, 255, .18), transparent 90%);
+            background: linear-gradient(
+                90deg,
+                transparent 10%,
+                rgba(25, 221, 255, .22),
+                rgba(138, 77, 255, .18),
+                transparent 90%);
             box-shadow: 0 0 8px rgba(25, 221, 255, .14);
             animation: scan 8s linear infinite;
             pointer-events: none;
@@ -227,7 +242,8 @@ public sealed class LandingPageFunction
 
     [Function("PulseLogo")]
     public async Task<HttpResponseData> Logo(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse-logo")] HttpRequestData request)
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse-logo")]
+        HttpRequestData request)
     {
         var response = request.CreateResponse(HttpStatusCode.OK);
         response.Headers.Add("Content-Type", "image/png");
@@ -235,16 +251,20 @@ public sealed class LandingPageFunction
         response.Headers.Add("X-Content-Type-Options", "nosniff");
 
         var assembly = Assembly.GetExecutingAssembly();
+
         var resourceName = assembly.GetManifestResourceNames()
-            .SingleOrDefault(name => name.EndsWith("project-pulse-logo.png", StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(name =>
+                name.EndsWith(
+                    "project-pulse-logo.png",
+                    StringComparison.OrdinalIgnoreCase));
 
         if (resourceName is null)
         {
-            var notFound = request.CreateResponse(HttpStatusCode.NotFound);
-            return notFound;
+            return request.CreateResponse(HttpStatusCode.NotFound);
         }
 
         await using var resource = assembly.GetManifestResourceStream(resourceName);
+
         if (resource is null)
         {
             return request.CreateResponse(HttpStatusCode.NotFound);
