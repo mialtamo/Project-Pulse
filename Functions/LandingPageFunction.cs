@@ -1,8 +1,6 @@
 using System.Net;
-using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
-using System.Text.Json;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 
@@ -10,8 +8,6 @@ namespace ProjectPulse.Processor.Functions;
 
 public sealed class LandingPageFunction
 {
-    private readonly HttpClient _httpClient = new();
-
     [Function("PulseLandingPage")]
     public async Task<HttpResponseData> Run(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "{*path}")]
@@ -33,6 +29,7 @@ public sealed class LandingPageFunction
             Environment.GetEnvironmentVariable("PROJECT_PULSE_ENVIRONMENT") ?? "UNKNOWN");
 
         var response = request.CreateResponse(HttpStatusCode.OK);
+
         response.Headers.Add("Content-Type", "text/html; charset=utf-8");
         response.Headers.Add("Cache-Control", "no-store, no-cache, must-revalidate");
         response.Headers.Add("Pragma", "no-cache");
@@ -50,6 +47,7 @@ public sealed class LandingPageFunction
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
     <title>Project Pulse</title>
+
     <style>
         :root {
             --cyan: #19ddff;
@@ -62,7 +60,9 @@ public sealed class LandingPageFunction
             --amber: #ffc857;
         }
 
-        * { box-sizing: border-box; }
+        * {
+            box-sizing: border-box;
+        }
 
         html, body {
             width: 100%;
@@ -71,7 +71,8 @@ public sealed class LandingPageFunction
             overflow: hidden;
             background: #000;
             color: var(--text);
-            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+                         BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
 
         body::before {
@@ -125,11 +126,13 @@ public sealed class LandingPageFunction
             position: absolute;
             inset: 18% 16% 12%;
             z-index: -1;
-            background: radial-gradient(ellipse at center,
+            background: radial-gradient(
+                ellipse at center,
                 rgba(20, 213, 255, .18) 0%,
                 rgba(64, 99, 255, .09) 40%,
                 rgba(137, 65, 255, .06) 58%,
-                transparent 76%);
+                transparent 76%
+            );
             filter: blur(28px);
             animation: glow 3.2s ease-in-out infinite alternate;
         }
@@ -240,7 +243,8 @@ public sealed class LandingPageFunction
                 transparent 10%,
                 rgba(25, 221, 255, .22),
                 rgba(138, 77, 255, .18),
-                transparent 90%);
+                transparent 90%
+            );
             box-shadow: 0 0 8px rgba(25, 221, 255, .14);
             animation: scan 8s linear infinite;
             pointer-events: none;
@@ -274,7 +278,9 @@ public sealed class LandingPageFunction
         }
 
         @media (max-width: 700px) {
-            .hero { width: min(1100px, 96vw); }
+            .hero {
+                width: min(1100px, 96vw);
+            }
 
             .version {
                 left: 16px;
@@ -292,10 +298,13 @@ public sealed class LandingPageFunction
         }
 
         @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after { animation: none !important; }
+            *, *::before, *::after {
+                animation: none !important;
+            }
         }
     </style>
 </head>
+
 <body>
     <div class="grid" aria-hidden="true"></div>
     <div class="scanline" aria-hidden="true"></div>
@@ -331,9 +340,12 @@ public sealed class LandingPageFunction
         </section>
     </main>
 
-    <div class="version" aria-label="Project Pulse version {{version}}, environment {{environment}}">
+    <div class="version"
+         aria-label="Project Pulse version {{version}}, environment {{environment}}">
         <span class="dot" aria-hidden="true"></span>
-        <span>Project Pulse&nbsp;&nbsp;v{{version}}&nbsp;&nbsp;•&nbsp;&nbsp;{{environment}}</span>
+        <span>
+            Project Pulse&nbsp;&nbsp;v{{version}}&nbsp;&nbsp;•&nbsp;&nbsp;{{environment}}
+        </span>
     </div>
 
     <script>
@@ -367,7 +379,9 @@ public sealed class LandingPageFunction
                 });
 
                 if (!response.ok) {
-                    throw new Error('Health endpoint returned ' + response.status);
+                    throw new Error(
+                        'Health endpoint returned ' + response.status
+                    );
                 }
 
                 const data = await response.json();
@@ -385,11 +399,14 @@ public sealed class LandingPageFunction
                 setStatus('serviceBus', false);
 
                 document.getElementById('lastCheck').textContent =
-                    'LAST CHECK: ' + new Date().toLocaleTimeString() + '  |  HEALTH ENDPOINT UNAVAILABLE';
+                    'LAST CHECK: ' +
+                    new Date().toLocaleTimeString() +
+                    ' | HEALTH ENDPOINT UNAVAILABLE';
             }
         }
 
         checkPulseHealth();
+
         setInterval(checkPulseHealth, 5000);
     </script>
 </body>
@@ -400,51 +417,26 @@ public sealed class LandingPageFunction
         return response;
     }
 
-    [Function("PulseHealth")]
-    public async Task<HttpResponseData> Health(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse-health")]
-        HttpRequestData request)
-    {
-        var appApi = await CheckHttpAsync(
-            Environment.GetEnvironmentVariable("AppApiBaseUrl"),
-            Environment.GetEnvironmentVariable("AppApiHealthPath") ?? "/health");
-
-        var apim = await CheckHttpAsync(
-            Environment.GetEnvironmentVariable("ApimBaseUrl"),
-            Environment.GetEnvironmentVariable("ApimHealthPath") ?? "/health");
-
-        var serviceBus = await CheckServiceBusAsync(
-            Environment.GetEnvironmentVariable("ServiceBusFullyQualifiedNamespace"));
-
-        var response = request.CreateResponse(HttpStatusCode.OK);
-        response.Headers.Add("Content-Type", "application/json");
-        response.Headers.Add("Cache-Control", "no-store");
-
-        var json = JsonSerializer.Serialize(new
-        {
-            appApi,
-            apim,
-            serviceBus,
-            checkedAt = DateTimeOffset.UtcNow
-        });
-
-        await response.WriteStringAsync(json, Encoding.UTF8);
-        return response;
-    }
-
     [Function("PulseLogo")]
     public async Task<HttpResponseData> Logo(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse-logo")]
         HttpRequestData request)
     {
         var response = request.CreateResponse(HttpStatusCode.OK);
+
         response.Headers.Add("Content-Type", "image/png");
-        response.Headers.Add("Cache-Control", "public, max-age=86400, immutable");
-        response.Headers.Add("X-Content-Type-Options", "nosniff");
+        response.Headers.Add(
+            "Cache-Control",
+            "public, max-age=86400, immutable");
+
+        response.Headers.Add(
+            "X-Content-Type-Options",
+            "nosniff");
 
         var assembly = Assembly.GetExecutingAssembly();
 
-        var resourceName = assembly.GetManifestResourceNames()
+        var resourceName = assembly
+            .GetManifestResourceNames()
             .FirstOrDefault(name =>
                 name.EndsWith(
                     "project-pulse-logo.png",
@@ -455,7 +447,8 @@ public sealed class LandingPageFunction
             return request.CreateResponse(HttpStatusCode.NotFound);
         }
 
-        await using var resource = assembly.GetManifestResourceStream(resourceName);
+        await using var resource =
+            assembly.GetManifestResourceStream(resourceName);
 
         if (resource is null)
         {
@@ -463,60 +456,7 @@ public sealed class LandingPageFunction
         }
 
         await resource.CopyToAsync(response.Body);
+
         return response;
-    }
-
-    private async Task<bool> CheckHttpAsync(string? baseUrl, string path)
-    {
-        try
-        {
-            if (string.IsNullOrWhiteSpace(baseUrl))
-            {
-                return false;
-            }
-
-            using var cancellationTokenSource =
-                new CancellationTokenSource(TimeSpan.FromSeconds(3));
-
-            var url =
-                $"{baseUrl.TrimEnd('/')}/{path.TrimStart('/')}";
-
-            using var response = await _httpClient.GetAsync(
-                url,
-                cancellationTokenSource.Token);
-
-            return response.IsSuccessStatusCode;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static async Task<bool> CheckServiceBusAsync(string? host)
-    {
-        try
-        {
-            if (string.IsNullOrWhiteSpace(host))
-            {
-                return false;
-            }
-
-            using var client = new TcpClient();
-
-            using var cancellationTokenSource =
-                new CancellationTokenSource(TimeSpan.FromSeconds(3));
-
-            await client.ConnectAsync(
-                host,
-                5671,
-                cancellationTokenSource.Token);
-
-            return client.Connected;
-        }
-        catch
-        {
-            return false;
-        }
     }
 }
