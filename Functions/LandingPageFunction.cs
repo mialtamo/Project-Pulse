@@ -10,7 +10,7 @@ public sealed class LandingPageFunction
 {
     [Function("PulseLandingPage")]
     public async Task<HttpResponseData> Run(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "")] HttpRequestData request)
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse")] HttpRequestData request)
     {
         var version = WebUtility.HtmlEncode(
             Environment.GetEnvironmentVariable("PROJECT_PULSE_VERSION") ?? "0.0.0");
