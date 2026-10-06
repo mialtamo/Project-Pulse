@@ -1,6 +1,8 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 
@@ -8,6 +10,8 @@ namespace ProjectPulse.Processor.Functions;
 
 public sealed class LandingPageFunction
 {
+    private readonly HttpClient _httpClient = new();
+
     [Function("PulseLandingPage")]
     public async Task<HttpResponseData> Run(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "{*path}")]
@@ -36,7 +40,7 @@ public sealed class LandingPageFunction
         response.Headers.Add("X-Frame-Options", "DENY");
         response.Headers.Add(
             "Content-Security-Policy",
-            "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+            "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
 
         var html = $$"""
 <!doctype html>
@@ -53,6 +57,9 @@ public sealed class LandingPageFunction
             --violet: #8a4dff;
             --text: #d7e6ff;
             --muted: #6f86a8;
+            --green: #39ff9a;
+            --red: #ff4d6d;
+            --amber: #ffc857;
         }
 
         * { box-sizing: border-box; }
@@ -137,6 +144,66 @@ public sealed class LandingPageFunction
             -webkit-user-drag: none;
         }
 
+        .status-panel {
+            position: fixed;
+            top: 24px;
+            right: 28px;
+            z-index: 20;
+            min-width: 390px;
+            padding: 16px 18px;
+            border: 1px solid rgba(25, 221, 255, .16);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, .52);
+            backdrop-filter: blur(10px);
+            box-shadow:
+                0 0 30px rgba(25, 221, 255, .05),
+                inset 0 0 25px rgba(25, 221, 255, .025);
+            font-family: "Courier New", Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.85;
+            color: #8098ba;
+        }
+
+        .status-title {
+            margin-bottom: 8px;
+            color: #d7e6ff;
+            font-weight: 700;
+            letter-spacing: .18em;
+            text-transform: uppercase;
+        }
+
+        .status-row {
+            white-space: nowrap;
+        }
+
+        .status-label {
+            color: #8098ba;
+        }
+
+        .connected {
+            color: var(--green);
+            text-shadow: 0 0 9px rgba(57, 255, 154, .68);
+        }
+
+        .disconnected {
+            color: var(--red);
+            text-shadow: 0 0 9px rgba(255, 77, 109, .62);
+        }
+
+        .checking {
+            color: var(--amber);
+            text-shadow: 0 0 8px rgba(255, 200, 87, .35);
+        }
+
+        .last-check {
+            margin-top: 8px;
+            padding-top: 7px;
+            border-top: 1px solid rgba(111, 134, 168, .14);
+            color: #526783;
+            font-size: 10px;
+            letter-spacing: .08em;
+        }
+
         .version {
             position: fixed;
             left: 24px;
@@ -208,7 +275,20 @@ public sealed class LandingPageFunction
 
         @media (max-width: 700px) {
             .hero { width: min(1100px, 96vw); }
-            .version { left: 16px; bottom: 14px; font-size: 9px; }
+
+            .version {
+                left: 16px;
+                bottom: 14px;
+                font-size: 9px;
+            }
+
+            .status-panel {
+                top: 12px;
+                right: 12px;
+                left: 12px;
+                min-width: 0;
+                font-size: 10px;
+            }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -219,6 +299,29 @@ public sealed class LandingPageFunction
 <body>
     <div class="grid" aria-hidden="true"></div>
     <div class="scanline" aria-hidden="true"></div>
+
+    <div class="status-panel">
+        <div class="status-title">SYSTEM STATUS</div>
+
+        <div class="status-row">
+            <span class="status-label">Checking Claims API / SQL..... </span>
+            <span id="appApi" class="checking">&lt;CHECKING...&gt;</span>
+        </div>
+
+        <div class="status-row">
+            <span class="status-label">Checking APIM / Backend....... </span>
+            <span id="apim" class="checking">&lt;CHECKING...&gt;</span>
+        </div>
+
+        <div class="status-row">
+            <span class="status-label">Checking Service Bus.......... </span>
+            <span id="serviceBus" class="checking">&lt;CHECKING...&gt;</span>
+        </div>
+
+        <div class="last-check" id="lastCheck">
+            LAST CHECK: awaiting first health probe
+        </div>
+    </div>
 
     <main class="shell">
         <section class="hero" aria-label="Project Pulse">
@@ -232,11 +335,100 @@ public sealed class LandingPageFunction
         <span class="dot" aria-hidden="true"></span>
         <span>Project Pulse&nbsp;&nbsp;v{{version}}&nbsp;&nbsp;•&nbsp;&nbsp;{{environment}}</span>
     </div>
+
+    <script>
+        function setStatus(id, connected) {
+            const element = document.getElementById(id);
+
+            if (connected) {
+                element.className = 'connected';
+                element.textContent = '<CONNECTED>';
+            } else {
+                element.className = 'disconnected';
+                element.textContent = '<DISCONNECTED>';
+            }
+        }
+
+        function setChecking() {
+            for (const id of ['appApi', 'apim', 'serviceBus']) {
+                const element = document.getElementById(id);
+                element.className = 'checking';
+                element.textContent = '<CHECKING...>';
+            }
+        }
+
+        async function checkPulseHealth() {
+            setChecking();
+
+            try {
+                const response = await fetch('/pulse-health', {
+                    method: 'GET',
+                    cache: 'no-store'
+                });
+
+                if (!response.ok) {
+                    throw new Error('Health endpoint returned ' + response.status);
+                }
+
+                const data = await response.json();
+
+                setStatus('appApi', data.appApi);
+                setStatus('apim', data.apim);
+                setStatus('serviceBus', data.serviceBus);
+
+                document.getElementById('lastCheck').textContent =
+                    'LAST CHECK: ' + new Date().toLocaleTimeString();
+            }
+            catch {
+                setStatus('appApi', false);
+                setStatus('apim', false);
+                setStatus('serviceBus', false);
+
+                document.getElementById('lastCheck').textContent =
+                    'LAST CHECK: ' + new Date().toLocaleTimeString() + '  |  HEALTH ENDPOINT UNAVAILABLE';
+            }
+        }
+
+        checkPulseHealth();
+        setInterval(checkPulseHealth, 5000);
+    </script>
 </body>
 </html>
 """;
 
         await response.WriteStringAsync(html, Encoding.UTF8);
+        return response;
+    }
+
+    [Function("PulseHealth")]
+    public async Task<HttpResponseData> Health(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse-health")]
+        HttpRequestData request)
+    {
+        var appApi = await CheckHttpAsync(
+            Environment.GetEnvironmentVariable("AppApiBaseUrl"),
+            Environment.GetEnvironmentVariable("AppApiHealthPath") ?? "/health");
+
+        var apim = await CheckHttpAsync(
+            Environment.GetEnvironmentVariable("ApimBaseUrl"),
+            Environment.GetEnvironmentVariable("ApimHealthPath") ?? "/health");
+
+        var serviceBus = await CheckServiceBusAsync(
+            Environment.GetEnvironmentVariable("ServiceBusFullyQualifiedNamespace"));
+
+        var response = request.CreateResponse(HttpStatusCode.OK);
+        response.Headers.Add("Content-Type", "application/json");
+        response.Headers.Add("Cache-Control", "no-store");
+
+        var json = JsonSerializer.Serialize(new
+        {
+            appApi,
+            apim,
+            serviceBus,
+            checkedAt = DateTimeOffset.UtcNow
+        });
+
+        await response.WriteStringAsync(json, Encoding.UTF8);
         return response;
     }
 
@@ -272,5 +464,59 @@ public sealed class LandingPageFunction
 
         await resource.CopyToAsync(response.Body);
         return response;
+    }
+
+    private async Task<bool> CheckHttpAsync(string? baseUrl, string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(baseUrl))
+            {
+                return false;
+            }
+
+            using var cancellationTokenSource =
+                new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+            var url =
+                $"{baseUrl.TrimEnd('/')}/{path.TrimStart('/')}";
+
+            using var response = await _httpClient.GetAsync(
+                url,
+                cancellationTokenSource.Token);
+
+            return response.IsSuccessStatusCode;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> CheckServiceBusAsync(string? host)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(host))
+            {
+                return false;
+            }
+
+            using var client = new TcpClient();
+
+            using var cancellationTokenSource =
+                new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+            await client.ConnectAsync(
+                host,
+                5671,
+                cancellationTokenSource.Token);
+
+            return client.Connected;
+        }
+        catch
+        {
+            return false;
+        }
     }
 }
