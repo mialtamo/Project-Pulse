@@ -1,0 +1,256 @@
+using System.Net;
+using System.Reflection;
+using System.Text;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Azure.Functions.Worker.Http;
+
+namespace ProjectPulse.Processor.Functions;
+
+public sealed class LandingPageFunction
+{
+    [Function("PulseLandingPage")]
+    public async Task<HttpResponseData> Run(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "")] HttpRequestData request)
+    {
+        var version = WebUtility.HtmlEncode(
+            Environment.GetEnvironmentVariable("PROJECT_PULSE_VERSION") ?? "0.0.0");
+
+        var environment = WebUtility.HtmlEncode(
+            Environment.GetEnvironmentVariable("PROJECT_PULSE_ENVIRONMENT") ?? "UNKNOWN");
+
+        var response = request.CreateResponse(HttpStatusCode.OK);
+        response.Headers.Add("Content-Type", "text/html; charset=utf-8");
+        response.Headers.Add("Cache-Control", "no-store, no-cache, must-revalidate");
+        response.Headers.Add("Pragma", "no-cache");
+        response.Headers.Add("X-Content-Type-Options", "nosniff");
+        response.Headers.Add("X-Frame-Options", "DENY");
+        response.Headers.Add(
+            "Content-Security-Policy",
+            "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+
+        var html = $$"""
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Project Pulse</title>
+    <style>
+        :root {
+            --cyan: #19ddff;
+            --blue: #3478ff;
+            --violet: #8a4dff;
+            --text: #d7e6ff;
+            --muted: #6f86a8;
+        }
+
+        * { box-sizing: border-box; }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            color: var(--text);
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        body::before {
+            content: "";
+            position: fixed;
+            inset: -35%;
+            pointer-events: none;
+            background:
+                radial-gradient(circle at 50% 44%, rgba(25, 221, 255, .08), transparent 28%),
+                radial-gradient(circle at 56% 48%, rgba(138, 77, 255, .07), transparent 34%);
+            animation: atmosphere 8s ease-in-out infinite alternate;
+        }
+
+        .grid {
+            position: fixed;
+            inset: 0;
+            opacity: .10;
+            background-image:
+                linear-gradient(rgba(74, 121, 255, .18) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(74, 121, 255, .18) 1px, transparent 1px);
+            background-size: 72px 72px;
+            mask-image: radial-gradient(circle at center, #000 0%, transparent 72%);
+            pointer-events: none;
+        }
+
+        .shell {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: grid;
+            place-items: center;
+            padding: 4vh 4vw;
+        }
+
+        .hero {
+            width: min(980px, 82vw);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transform: translateY(-1.2vh);
+        }
+
+        .logo-wrap {
+            position: relative;
+            width: 100%;
+            animation: float 6s ease-in-out infinite;
+        }
+
+        .logo-wrap::before {
+            content: "";
+            position: absolute;
+            inset: 18% 16% 12%;
+            z-index: -1;
+            background: radial-gradient(ellipse at center,
+                rgba(20, 213, 255, .18) 0%,
+                rgba(64, 99, 255, .09) 40%,
+                rgba(137, 65, 255, .06) 58%,
+                transparent 76%);
+            filter: blur(28px);
+            animation: glow 3.2s ease-in-out infinite alternate;
+        }
+
+        .logo {
+            display: block;
+            width: 100%;
+            height: auto;
+            object-fit: contain;
+            filter: drop-shadow(0 0 18px rgba(41, 197, 255, .13));
+            user-select: none;
+            -webkit-user-drag: none;
+        }
+
+        .version {
+            position: fixed;
+            left: 24px;
+            bottom: 19px;
+            z-index: 5;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--muted);
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: .16em;
+            text-transform: uppercase;
+            user-select: none;
+        }
+
+        .version .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--cyan);
+            box-shadow: 0 0 12px rgba(25, 221, 255, .95);
+            animation: blink 2.1s ease-in-out infinite;
+        }
+
+        .scanline {
+            position: fixed;
+            left: 0;
+            right: 0;
+            height: 1px;
+            top: -2px;
+            background: linear-gradient(90deg, transparent 10%, rgba(25, 221, 255, .22), rgba(138, 77, 255, .18), transparent 90%);
+            box-shadow: 0 0 8px rgba(25, 221, 255, .14);
+            animation: scan 8s linear infinite;
+            pointer-events: none;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0) scale(1); }
+            50% { transform: translateY(-8px) scale(1.003); }
+        }
+
+        @keyframes glow {
+            from { opacity: .72; transform: scale(.98); }
+            to { opacity: 1; transform: scale(1.035); }
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: .62; }
+            50% { opacity: 1; }
+        }
+
+        @keyframes scan {
+            from { transform: translateY(0); opacity: 0; }
+            8% { opacity: 1; }
+            92% { opacity: 1; }
+            to { transform: translateY(100vh); opacity: 0; }
+        }
+
+        @keyframes atmosphere {
+            from { transform: scale(1) rotate(0deg); opacity: .82; }
+            to { transform: scale(1.06) rotate(.8deg); opacity: 1; }
+        }
+
+        @media (max-width: 700px) {
+            .hero { width: min(1100px, 96vw); }
+            .version { left: 16px; bottom: 14px; font-size: 9px; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation: none !important; }
+        }
+    </style>
+</head>
+<body>
+    <div class="grid" aria-hidden="true"></div>
+    <div class="scanline" aria-hidden="true"></div>
+
+    <main class="shell">
+        <section class="hero" aria-label="Project Pulse">
+            <div class="logo-wrap">
+                <img class="logo" src="/pulse-logo" alt="Project Pulse" />
+            </div>
+        </section>
+    </main>
+
+    <div class="version" aria-label="Project Pulse version {{version}}, environment {{environment}}">
+        <span class="dot" aria-hidden="true"></span>
+        <span>Project Pulse&nbsp;&nbsp;v{{version}}&nbsp;&nbsp;•&nbsp;&nbsp;{{environment}}</span>
+    </div>
+</body>
+</html>
+""";
+
+        await response.WriteStringAsync(html, Encoding.UTF8);
+        return response;
+    }
+
+    [Function("PulseLogo")]
+    public async Task<HttpResponseData> Logo(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse-logo")] HttpRequestData request)
+    {
+        var response = request.CreateResponse(HttpStatusCode.OK);
+        response.Headers.Add("Content-Type", "image/png");
+        response.Headers.Add("Cache-Control", "public, max-age=86400, immutable");
+        response.Headers.Add("X-Content-Type-Options", "nosniff");
+
+        var assembly = Assembly.GetExecutingAssembly();
+        var resourceName = assembly.GetManifestResourceNames()
+            .SingleOrDefault(name => name.EndsWith("project-pulse-logo.png", StringComparison.OrdinalIgnoreCase));
+
+        if (resourceName is null)
+        {
+            var notFound = request.CreateResponse(HttpStatusCode.NotFound);
+            return notFound;
+        }
+
+        await using var resource = assembly.GetManifestResourceStream(resourceName);
+        if (resource is null)
+        {
+            return request.CreateResponse(HttpStatusCode.NotFound);
+        }
+
+        await resource.CopyToAsync(response.Body);
+        return response;
+    }
+}

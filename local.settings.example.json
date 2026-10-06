@@ -1,0 +1,45 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+
+    "PROJECT_PULSE_VERSION": "0.1.0",
+    "PROJECT_PULSE_ENVIRONMENT": "POC",
+
+    "POLL_SCHEDULE": "0 * * * * *",
+    "MaxConcurrentRequests": "50",
+
+    "AppApiBaseUrl": "https://internal-api.example.com",
+    "AppApiHealthPath": "/health",
+    "AppApiPendingClaimsPath": "/claims/pending",
+    "AppApiResultPathTemplate": "/claims/{uniqueId}/result",
+    "AppApiPollMethod": "POST",
+    "AppApiRecordsField": "records",
+    "AppApiTimeoutSeconds": "10",
+    "AppApiScope": "api://YOUR-INTERNAL-API-APP-ID/.default",
+
+    "ApimBaseUrl": "https://claims-api.example.com",
+    "ApimHealthPath": "/health",
+    "ApimAdjudicationPath": "/claims/adjudicate",
+    "ApimRequestTimeoutSeconds": "15",
+    "ApimScope": "api://YOUR-APIM-PROTECTED-API-APP-ID/.default",
+
+    "UniqueIdField": "UniqueId",
+
+    "RetryHttpStatusCodes": "404,408,429,500,502,503,504",
+    "JsonResponseCodeField": "ResponseCode",
+    "JsonRetryCodes": "",
+    "JsonAlertCodes": "419",
+
+    "ServiceBusFullyQualifiedNamespace": "sb-pulse-dev.servicebus.windows.net",
+    "ServiceBusQueueName": "pulse-claim-retry",
+    "ServiceBusMessageTtlMinutes": "10",
+
+    "CircuitFailureThreshold": "5",
+    "CircuitOpenSeconds": "30",
+
+    "ResultWriteMaxAttempts": "3",
+    "ResultWriteRetryDelayMilliseconds": "500"
+  }
+}
