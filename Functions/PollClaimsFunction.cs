@@ -1,10 +1,8 @@
 using ProjectPulse.Processor.Models;
-using ProjectPulse.Processor.Options;
 using ProjectPulse.Processor.Services;
 using Microsoft.ApplicationInsights;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace ProjectPulse.Processor.Functions;
 
@@ -12,12 +10,9 @@ public sealed class PollClaimsFunction(
     IHealthGate healthGate,
     IAppApiClient appApiClient,
     IClaimProcessor claimProcessor,
-    IOptions<ClaimProcessorOptions> options,
     TelemetryClient telemetry,
     ILogger<PollClaimsFunction> logger)
 {
-    private readonly ClaimProcessorOptions _options = options.Value;
-
     [Function("PollClaims")]
     public async Task Run(
         [TimerTrigger("%POLL_SCHEDULE%", UseMonitor = true)] TimerInfo timerInfo,
@@ -26,21 +21,21 @@ public sealed class PollClaimsFunction(
         var runId = Guid.NewGuid().ToString("N");
         using var scope = logger.BeginScope(new Dictionary<string, object> { ["PollRunId"] = runId });
 
-        logger.LogInformation("Claim poll started. Schedule status: {ScheduleStatus}", timerInfo.ScheduleStatus);
+        logger.LogInformation("RTA queued request poll started. Schedule status: {ScheduleStatus}", timerInfo.ScheduleStatus);
 
-        var (appApiHealth, apimHealth) = await healthGate.CheckAsync(cancellationToken);
-        if (!appApiHealth.IsHealthy || !apimHealth.IsHealthy)
+        var (rtaHealth, apimHealth) = await healthGate.CheckAsync(cancellationToken);
+        if (!rtaHealth.IsHealthy || !apimHealth.IsHealthy)
         {
             telemetry.TrackEvent("ClaimPollSkippedDependencyUnhealthy", new Dictionary<string, string>
             {
                 ["runId"] = runId,
-                ["appApiHealthy"] = appApiHealth.IsHealthy.ToString(),
+                ["rtaHealthy"] = rtaHealth.IsHealthy.ToString(),
                 ["apimHealthy"] = apimHealth.IsHealthy.ToString()
             });
 
             logger.LogWarning(
-                "Claim poll skipped because a dependency is unhealthy. AppApi={AppApiHealthy}, APIM/Backend={ApimHealthy}",
-                appApiHealth.IsHealthy,
+                "Poll skipped because a dependency is unhealthy. RTA={RtaHealthy}, APIM/Backend={ApimHealthy}",
+                rtaHealth.IsHealthy,
                 apimHealth.IsHealthy);
             return;
         }
@@ -52,44 +47,38 @@ public sealed class PollClaimsFunction(
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
         {
-            logger.LogError(ex, "Claim polling failed before records could be processed");
+            logger.LogError(ex, "RTA queued polling failed before records could be processed");
             telemetry.TrackException(ex);
             return;
         }
 
         if (claims.Count == 0)
         {
-            logger.LogInformation("No claims returned by the App API");
+            logger.LogInformation("No queued requests returned by RTA");
             return;
         }
 
-        var results = new System.Collections.Concurrent.ConcurrentBag<ClaimProcessingResult>();
-        var parallelOptions = new ParallelOptions
+        IReadOnlyList<ClaimProcessingResult> results;
+        try
         {
-            MaxDegreeOfParallelism = Math.Max(1, _options.MaxConcurrentRequests),
-            CancellationToken = cancellationToken
-        };
-
-        await Parallel.ForEachAsync(claims, parallelOptions, async (claim, ct) =>
+            results = await claimProcessor.ProcessBatchAsync(claims, cancellationToken);
+        }
+        catch (Exception ex)
         {
-            try
-            {
-                results.Add(await claimProcessor.ProcessAsync(claim, ct));
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Unexpected claim processing exception. Claim payload is intentionally not logged.");
-                telemetry.TrackException(ex);
-            }
-        });
+            logger.LogError(ex, "Unexpected batch processing exception. Claim payloads are intentionally not logged.");
+            telemetry.TrackException(ex);
+            return;
+        }
 
         var summary = results
             .GroupBy(x => x.Disposition)
             .ToDictionary(g => g.Key.ToString(), g => g.Count());
 
         telemetry.TrackEvent("ClaimPollCompleted", summary.ToDictionary(x => x.Key, x => x.Value.ToString()));
+        telemetry.TrackMetric("ClaimBatchSize", claims.Count);
+
         logger.LogInformation(
-            "Claim poll completed. Returned={Returned}, Completed={Completed}, Retry={Retry}, Alerted={Alerted}, WritebackFailed={WritebackFailed}",
+            "Poll completed. Batched={Batched}, Completed={Completed}, Retry={Retry}, Alerted={Alerted}, WritebackFailed={WritebackFailed}",
             claims.Count,
             summary.GetValueOrDefault(nameof(ClaimProcessingDisposition.Completed), 0),
             summary.GetValueOrDefault(nameof(ClaimProcessingDisposition.QueuedForRetry), 0),

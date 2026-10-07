@@ -3,7 +3,6 @@ using Azure.Identity;
 using Azure.Messaging.ServiceBus;
 using ProjectPulse.Processor.Options;
 using ProjectPulse.Processor.Services;
-using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -47,6 +46,7 @@ builder.Services.AddSingleton<IAuthHeaderProvider, ManagedIdentityAuthHeaderProv
 builder.Services.AddSingleton<IHealthGate, HealthGate>();
 builder.Services.AddSingleton<IAppApiClient, AppApiClient>();
 builder.Services.AddSingleton<IRetryQueue, ServiceBusRetryQueue>();
+builder.Services.AddSingleton<PayloadTransformer>();
 builder.Services.AddSingleton<IClaimProcessor, ClaimProcessor>();
 builder.Services.AddSingleton<OutboundCircuitBreaker>();
 

@@ -5,5 +5,5 @@ namespace ProjectPulse.Processor.Services;
 public interface IAppApiClient
 {
     Task<IReadOnlyList<JsonElement>> GetPendingClaimsAsync(CancellationToken cancellationToken);
-    Task<bool> WriteResultAsync(string uniqueId, string responseJson, CancellationToken cancellationToken);
+    Task<bool> WriteStatusAsync(string correlationId, string responseJson, CancellationToken cancellationToken);
 }

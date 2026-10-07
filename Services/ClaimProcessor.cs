@@ -1,7 +1,7 @@
 using System.Diagnostics;
-using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ProjectPulse.Processor.Models;
 using ProjectPulse.Processor.Options;
 using Microsoft.ApplicationInsights;
@@ -15,6 +15,7 @@ public sealed class ClaimProcessor(
     IAuthHeaderProvider authHeaderProvider,
     IAppApiClient appApiClient,
     IRetryQueue retryQueue,
+    PayloadTransformer transformer,
     OutboundCircuitBreaker circuitBreaker,
     IOptions<ClaimProcessorOptions> options,
     TelemetryClient telemetry,
@@ -25,29 +26,48 @@ public sealed class ClaimProcessor(
     private readonly HashSet<string> _jsonRetryCodes = options.Value.GetJsonRetryCodeSet();
     private readonly HashSet<string> _jsonAlertCodes = options.Value.GetJsonAlertCodeSet();
 
-    public async Task<ClaimProcessingResult> ProcessAsync(JsonElement claim, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ClaimProcessingResult>> ProcessBatchAsync(
+        IReadOnlyList<JsonElement> claims,
+        CancellationToken cancellationToken)
     {
-        var uniqueId = GetUniqueId(claim);
-        using var operation = telemetry.StartOperation<Microsoft.ApplicationInsights.DataContracts.RequestTelemetry>("ClaimAdjudication");
-        operation.Telemetry.Properties["uniqueId"] = uniqueId;
+        if (claims.Count == 0)
+        {
+            return [];
+        }
+
+        var correlationIds = claims.Select(GetCorrelationId).ToArray();
+        var batchId = Guid.NewGuid().ToString("N");
+        using var operation = telemetry.StartOperation<Microsoft.ApplicationInsights.DataContracts.RequestTelemetry>("ClaimBatchAdjudication");
+        operation.Telemetry.Properties["batchId"] = batchId;
+        operation.Telemetry.Properties["recordCount"] = claims.Count.ToString();
         var stopwatch = Stopwatch.StartNew();
 
         if (!circuitBreaker.CanAttempt())
         {
-            await retryQueue.EnqueueAsync(uniqueId, "OutboundCircuitOpen", cancellationToken);
+            await QueueAllAsync(correlationIds, "OutboundCircuitOpen", cancellationToken);
             CompleteTelemetry(operation.Telemetry, false, "CircuitOpen", stopwatch.ElapsedMilliseconds);
-            return new ClaimProcessingResult(uniqueId, ClaimProcessingDisposition.QueuedForRetry, "OutboundCircuitOpen");
+            return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "OutboundCircuitOpen");
         }
 
-        var client = httpClientFactory.CreateClient("Apim");
-        var claimJson = claim.GetRawText();
+        var transformed = new JsonArray();
+        foreach (var claim in claims)
+        {
+            transformed.Add(transformer.Transform(claim));
+        }
 
+        JsonNode outboundPayload = string.IsNullOrWhiteSpace(_options.ApimBatchRootProperty)
+            ? transformed
+            : new JsonObject { [_options.ApimBatchRootProperty] = transformed };
+
+        var client = httpClientFactory.CreateClient("Apim");
         using var request = new HttpRequestMessage(HttpMethod.Post, _options.ApimAdjudicationPath)
         {
-            Content = new StringContent(claimJson, Encoding.UTF8, "application/json")
+            Content = new StringContent(outboundPayload.ToJsonString(), Encoding.UTF8, "application/json")
         };
-        request.Headers.TryAddWithoutValidation("X-Correlation-ID", uniqueId);
-        request.Headers.TryAddWithoutValidation("Idempotency-Key", uniqueId);
+
+        request.Headers.TryAddWithoutValidation("X-Correlation-ID", batchId);
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", batchId);
+        request.Headers.TryAddWithoutValidation("X-Pulse-Record-Count", claims.Count.ToString());
         await authHeaderProvider.ApplyBearerTokenAsync(request, _options.ApimScope, cancellationToken);
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -65,19 +85,19 @@ public sealed class ClaimProcessor(
 
                 if (_retryHttpCodes.Contains(statusCode))
                 {
-                    await retryQueue.EnqueueAsync(uniqueId, $"Http{statusCode}", cancellationToken);
+                    await QueueAllAsync(correlationIds, $"Http{statusCode}", cancellationToken);
                     CompleteTelemetry(operation.Telemetry, false, $"HTTP {statusCode}", stopwatch.ElapsedMilliseconds);
-                    return new ClaimProcessingResult(uniqueId, ClaimProcessingDisposition.QueuedForRetry, $"Http{statusCode}", statusCode);
+                    return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, $"Http{statusCode}", statusCode);
                 }
 
-                logger.LogError("Claim {UniqueId} received non-retry HTTP status {StatusCode}", uniqueId, statusCode);
-                telemetry.TrackEvent("ClaimNonRetryHttpFailure", new Dictionary<string, string>
-                {
-                    ["uniqueId"] = uniqueId,
-                    ["statusCode"] = statusCode.ToString()
-                });
+                logger.LogError(
+                    "APIM batch {BatchId} with {Count} records received non-retry HTTP status {StatusCode}",
+                    batchId,
+                    claims.Count,
+                    statusCode);
+
                 CompleteTelemetry(operation.Telemetry, false, $"HTTP {statusCode}", stopwatch.ElapsedMilliseconds);
-                return new ClaimProcessingResult(uniqueId, ClaimProcessingDisposition.Alerted, $"Http{statusCode}", statusCode);
+                return BuildResults(correlationIds, ClaimProcessingDisposition.Alerted, $"Http{statusCode}", statusCode);
             }
 
             circuitBreaker.RecordSuccess();
@@ -85,82 +105,173 @@ public sealed class ClaimProcessor(
 
             if (!string.IsNullOrWhiteSpace(businessCode) && _jsonRetryCodes.Contains(businessCode))
             {
-                await retryQueue.EnqueueAsync(uniqueId, $"JsonCode:{businessCode}", cancellationToken);
+                await QueueAllAsync(correlationIds, $"JsonCode:{businessCode}", cancellationToken);
                 CompleteTelemetry(operation.Telemetry, false, $"JSON {businessCode}", stopwatch.ElapsedMilliseconds);
-                return new ClaimProcessingResult(uniqueId, ClaimProcessingDisposition.QueuedForRetry, "JsonRetryCode", statusCode, businessCode);
+                return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "JsonRetryCode", statusCode, businessCode);
             }
 
-            var writebackSucceeded = await appApiClient.WriteResultAsync(uniqueId, responseJson, cancellationToken);
-            if (!writebackSucceeded)
+            if (_options.RtaStatusWritebackEnabled)
             {
-                logger.LogError(
-                    "Claim {UniqueId} was adjudicated but result writeback failed. The claim will NOT be automatically resubmitted to avoid duplicate adjudication.",
-                    uniqueId);
-                CompleteTelemetry(operation.Telemetry, false, "WritebackFailed", stopwatch.ElapsedMilliseconds);
-                return new ClaimProcessingResult(uniqueId, ClaimProcessingDisposition.FailedWriteback, "ResultWritebackFailed", statusCode, businessCode);
+                var writebackResults = await WriteBatchResultsAsync(responseJson, correlationIds, cancellationToken);
+                if (!writebackResults)
+                {
+                    CompleteTelemetry(operation.Telemetry, false, "WritebackFailed", stopwatch.ElapsedMilliseconds);
+                    return BuildResults(correlationIds, ClaimProcessingDisposition.FailedWriteback, "ResultWritebackFailed", statusCode, businessCode);
+                }
+            }
+            else
+            {
+                telemetry.TrackEvent("RtaStatusWritebackSkipped", new Dictionary<string, string>
+                {
+                    ["batchId"] = batchId,
+                    ["recordCount"] = claims.Count.ToString()
+                });
             }
 
             if (!string.IsNullOrWhiteSpace(businessCode) && _jsonAlertCodes.Contains(businessCode))
             {
-                telemetry.TrackEvent("ClaimBusinessAlert", new Dictionary<string, string>
+                telemetry.TrackEvent("ClaimBatchBusinessAlert", new Dictionary<string, string>
                 {
-                    ["uniqueId"] = uniqueId,
-                    ["businessCode"] = businessCode
+                    ["batchId"] = batchId,
+                    ["businessCode"] = businessCode,
+                    ["recordCount"] = claims.Count.ToString()
                 });
-                logger.LogWarning("Claim {UniqueId} returned configured JSON alert code {BusinessCode}", uniqueId, businessCode);
+
                 CompleteTelemetry(operation.Telemetry, true, $"JSON alert {businessCode}", stopwatch.ElapsedMilliseconds);
-                return new ClaimProcessingResult(uniqueId, ClaimProcessingDisposition.Alerted, "JsonAlertCode", statusCode, businessCode);
+                return BuildResults(correlationIds, ClaimProcessingDisposition.Alerted, "JsonAlertCode", statusCode, businessCode);
             }
 
             CompleteTelemetry(operation.Telemetry, true, "Completed", stopwatch.ElapsedMilliseconds);
-            return new ClaimProcessingResult(uniqueId, ClaimProcessingDisposition.Completed, "Completed", statusCode, businessCode);
+            return BuildResults(correlationIds, ClaimProcessingDisposition.Completed, "BatchCompleted", statusCode, businessCode);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             circuitBreaker.RecordFailure();
-            await retryQueue.EnqueueAsync(uniqueId, "ApimTimeout", cancellationToken);
+            await QueueAllAsync(correlationIds, "ApimTimeout", cancellationToken);
             CompleteTelemetry(operation.Telemetry, false, "Timeout", stopwatch.ElapsedMilliseconds);
-            return new ClaimProcessingResult(uniqueId, ClaimProcessingDisposition.QueuedForRetry, "ApimTimeout");
+            return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "ApimTimeout");
         }
         catch (HttpRequestException ex)
         {
             circuitBreaker.RecordFailure();
             var statusCode = ex.StatusCode.HasValue ? (int)ex.StatusCode.Value : (int?)null;
-            await retryQueue.EnqueueAsync(uniqueId, "NetworkFailure", cancellationToken);
-            logger.LogWarning(ex, "Network failure while processing claim {UniqueId}", uniqueId);
+            await QueueAllAsync(correlationIds, "NetworkFailure", cancellationToken);
+            logger.LogWarning(ex, "Network failure while processing APIM batch {BatchId}", batchId);
             CompleteTelemetry(operation.Telemetry, false, "NetworkFailure", stopwatch.ElapsedMilliseconds);
-            return new ClaimProcessingResult(uniqueId, ClaimProcessingDisposition.QueuedForRetry, "NetworkFailure", statusCode);
+            return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "NetworkFailure", statusCode);
         }
         catch (JsonException ex)
         {
-            logger.LogError(ex, "Invalid JSON response while processing claim {UniqueId}", uniqueId);
-            telemetry.TrackEvent("ClaimInvalidJsonResponse", new Dictionary<string, string> { ["uniqueId"] = uniqueId });
+            logger.LogError(ex, "Invalid JSON response while processing APIM batch {BatchId}", batchId);
+            telemetry.TrackException(ex);
             CompleteTelemetry(operation.Telemetry, false, "InvalidJson", stopwatch.ElapsedMilliseconds);
-            return new ClaimProcessingResult(uniqueId, ClaimProcessingDisposition.Alerted, "InvalidJsonResponse");
+            return BuildResults(correlationIds, ClaimProcessingDisposition.Alerted, "InvalidJsonResponse");
         }
     }
 
-    private string GetUniqueId(JsonElement claim)
+    private string GetCorrelationId(JsonElement claim)
     {
         if (claim.ValueKind != JsonValueKind.Object ||
-            !claim.TryGetProperty(_options.UniqueIdField, out var value))
+            !claim.TryGetProperty(_options.CorrelationIdField, out var value))
         {
-            throw new InvalidOperationException($"Claim JSON does not contain configured unique ID field '{_options.UniqueIdField}'.");
+            throw new InvalidOperationException(
+                $"Queued request JSON does not contain configured correlation ID field '{_options.CorrelationIdField}'.");
         }
 
-        var uniqueId = value.ValueKind switch
+        var correlationId = value.ValueKind switch
         {
             JsonValueKind.String => value.GetString(),
             JsonValueKind.Number => value.GetRawText(),
             _ => value.ToString()
         };
 
-        if (string.IsNullOrWhiteSpace(uniqueId))
+        if (string.IsNullOrWhiteSpace(correlationId))
         {
-            throw new InvalidOperationException($"Claim unique ID field '{_options.UniqueIdField}' is empty.");
+            throw new InvalidOperationException(
+                $"Queued request correlation ID field '{_options.CorrelationIdField}' is empty.");
         }
 
-        return uniqueId;
+        return correlationId;
+    }
+
+    private async Task QueueAllAsync(
+        IEnumerable<string> correlationIds,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        foreach (var correlationId in correlationIds)
+        {
+            await retryQueue.EnqueueAsync(correlationId, reason, cancellationToken);
+        }
+    }
+
+    private async Task<bool> WriteBatchResultsAsync(
+        string responseJson,
+        IReadOnlyList<string> correlationIds,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(responseJson))
+        {
+            logger.LogWarning("RTA writeback is enabled but APIM returned an empty response body.");
+            return false;
+        }
+
+        using var document = JsonDocument.Parse(responseJson);
+        var root = document.RootElement;
+
+        if (root.ValueKind != JsonValueKind.Array)
+        {
+            logger.LogWarning(
+                "RTA writeback is enabled but APIM response contract is not yet an array. Writeback skipped until the final APIM contract is known.");
+            return false;
+        }
+
+        var success = true;
+        foreach (var item in root.EnumerateArray())
+        {
+            if (!TryGetResponseCorrelationId(item, out var correlationId))
+            {
+                logger.LogWarning("APIM response item did not contain a correlation ID. Writeback skipped for that item.");
+                success = false;
+                continue;
+            }
+
+            success &= await appApiClient.WriteStatusAsync(
+                correlationId,
+                item.GetRawText(),
+                cancellationToken);
+        }
+
+        if (root.GetArrayLength() != correlationIds.Count)
+        {
+            logger.LogWarning(
+                "APIM response item count {ResponseCount} did not match submitted batch count {SubmittedCount}",
+                root.GetArrayLength(),
+                correlationIds.Count);
+        }
+
+        return success;
+    }
+
+    private static bool TryGetResponseCorrelationId(JsonElement item, out string correlationId)
+    {
+        correlationId = string.Empty;
+        if (item.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!item.TryGetProperty("CORRELATION_ID", out var value) &&
+            !item.TryGetProperty("correlationId", out value))
+        {
+            return false;
+        }
+
+        correlationId = value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : value.ToString();
+
+        return !string.IsNullOrWhiteSpace(correlationId);
     }
 
     private string? TryGetBusinessCode(string json)
@@ -184,6 +295,16 @@ public sealed class ClaimProcessor(
             _ => value.ToString()
         };
     }
+
+    private static IReadOnlyList<ClaimProcessingResult> BuildResults(
+        IEnumerable<string> correlationIds,
+        ClaimProcessingDisposition disposition,
+        string reason,
+        int? httpStatusCode = null,
+        string? businessCode = null) =>
+        correlationIds
+            .Select(id => new ClaimProcessingResult(id, disposition, reason, httpStatusCode, businessCode))
+            .ToArray();
 
     private static void CompleteTelemetry(
         Microsoft.ApplicationInsights.DataContracts.RequestTelemetry request,
