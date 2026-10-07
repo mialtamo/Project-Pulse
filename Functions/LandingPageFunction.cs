@@ -116,13 +116,14 @@ public sealed class LandingPageFunction
             padding: 4vh 4vw;
         }
 
-        .hero {
-            width: min(980px, 82vw);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transform: translateY(-1.2vh);
-        }
+.hero {
+    width: min(980px, 72vw);
+    max-height: 68vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transform: translateY(3vh);
+}
 
         .logo-wrap {
             position: relative;
@@ -146,15 +147,16 @@ public sealed class LandingPageFunction
             animation: glow 3.2s ease-in-out infinite alternate;
         }
 
-        .logo {
-            display: block;
-            width: 100%;
-            height: auto;
-            object-fit: contain;
-            filter: drop-shadow(0 0 18px rgba(41, 197, 255, .13));
-            user-select: none;
-            -webkit-user-drag: none;
-        }
+.logo {
+    display: block;
+    width: 100%;
+    max-height: 68vh;
+    height: auto;
+    object-fit: contain;
+    filter: drop-shadow(0 0 18px rgba(41, 197, 255, .13));
+    user-select: none;
+    -webkit-user-drag: none;
+}
 
         .status-panel {
             position: fixed;
