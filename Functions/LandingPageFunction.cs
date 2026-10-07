@@ -4,11 +4,11 @@ using System.Text;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 
-namespace ProjectPulse.Processor.Functions;
+namespace ProjectPulse.Api.Functions;
 
 public sealed class LandingPageFunction
 {
-    [Function("PulseLandingPage")]
+    [Function("PulseApiLandingPage")]
     public async Task<HttpResponseData> Run(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "{*path}")]
         HttpRequestData request,
@@ -17,16 +17,16 @@ public sealed class LandingPageFunction
         var normalizedPath = (path ?? string.Empty).Trim('/');
 
         if (!string.IsNullOrEmpty(normalizedPath) &&
-            !normalizedPath.Equals("pulse", StringComparison.OrdinalIgnoreCase))
+            !normalizedPath.Equals("pulse-api", StringComparison.OrdinalIgnoreCase))
         {
             return request.CreateResponse(HttpStatusCode.NotFound);
         }
 
         var version = WebUtility.HtmlEncode(
-            Environment.GetEnvironmentVariable("PROJECT_PULSE_VERSION") ?? "0.0.0");
+            Environment.GetEnvironmentVariable("PROJECT_PULSE_API_VERSION") ?? "0.1.0");
 
         var environment = WebUtility.HtmlEncode(
-            Environment.GetEnvironmentVariable("PROJECT_PULSE_ENVIRONMENT") ?? "UNKNOWN");
+            Environment.GetEnvironmentVariable("PROJECT_PULSE_API_ENVIRONMENT") ?? "POC");
 
         var response = request.CreateResponse(HttpStatusCode.OK);
 
@@ -35,6 +35,7 @@ public sealed class LandingPageFunction
         response.Headers.Add("Pragma", "no-cache");
         response.Headers.Add("X-Content-Type-Options", "nosniff");
         response.Headers.Add("X-Frame-Options", "DENY");
+
         response.Headers.Add(
             "Content-Security-Policy",
             "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
@@ -46,7 +47,7 @@ public sealed class LandingPageFunction
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
-    <title>Project Pulse</title>
+    <title>Project Pulse API</title>
 
     <style>
         :root {
@@ -71,8 +72,7 @@ public sealed class LandingPageFunction
             overflow: hidden;
             background: #000;
             color: var(--text);
-            font-family: Inter, ui-sans-serif, system-ui, -apple-system,
-                         BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-family: "Courier New", Consolas, monospace;
         }
 
         body::before {
@@ -81,8 +81,8 @@ public sealed class LandingPageFunction
             inset: -35%;
             pointer-events: none;
             background:
-                radial-gradient(circle at 50% 44%, rgba(25, 221, 255, .08), transparent 28%),
-                radial-gradient(circle at 56% 48%, rgba(138, 77, 255, .07), transparent 34%);
+                radial-gradient(circle at 30% 24%, rgba(25, 221, 255, .08), transparent 26%),
+                radial-gradient(circle at 70% 58%, rgba(138, 77, 255, .07), transparent 34%);
             animation: atmosphere 8s ease-in-out infinite alternate;
         }
 
@@ -98,53 +98,46 @@ public sealed class LandingPageFunction
             pointer-events: none;
         }
 
-        .shell {
-            position: relative;
-            width: 100%;
-            height: 100%;
-            display: grid;
-            place-items: center;
-            padding: 4vh 4vw;
+        .scanline {
+            position: fixed;
+            left: 0;
+            right: 0;
+            height: 1px;
+            top: -2px;
+            background: linear-gradient(
+                90deg,
+                transparent 10%,
+                rgba(25,221,255,.22),
+                rgba(138,77,255,.18),
+                transparent 90%);
+            box-shadow: 0 0 8px rgba(25, 221, 255, .14);
+            animation: scan 8s linear infinite;
+            pointer-events: none;
         }
 
-        .hero {
-            width: min(980px, 82vw);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transform: translateY(-1.2vh);
+        .brand {
+            position: fixed;
+            top: 24px;
+            left: 28px;
+            z-index: 20;
+            width: 310px;
         }
 
-        .logo-wrap {
-            position: relative;
-            width: 100%;
-            animation: float 6s ease-in-out infinite;
-        }
-
-        .logo-wrap::before {
-            content: "";
-            position: absolute;
-            inset: 18% 16% 12%;
-            z-index: -1;
-            background: radial-gradient(
-                ellipse at center,
-                rgba(20, 213, 255, .18) 0%,
-                rgba(64, 99, 255, .09) 40%,
-                rgba(137, 65, 255, .06) 58%,
-                transparent 76%
-            );
-            filter: blur(28px);
-            animation: glow 3.2s ease-in-out infinite alternate;
-        }
-
-        .logo {
+        .brand img {
             display: block;
             width: 100%;
             height: auto;
-            object-fit: contain;
-            filter: drop-shadow(0 0 18px rgba(41, 197, 255, .13));
-            user-select: none;
-            -webkit-user-drag: none;
+            filter: drop-shadow(0 0 18px rgba(41, 197, 255, .18));
+        }
+
+        .api-tag {
+            margin-top: -4px;
+            padding-left: 7px;
+            color: var(--cyan);
+            font-size: 11px;
+            letter-spacing: .32em;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(25, 221, 255, .4);
         }
 
         .status-panel {
@@ -152,22 +145,22 @@ public sealed class LandingPageFunction
             top: 24px;
             right: 28px;
             z-index: 20;
-            min-width: 390px;
+            min-width: 365px;
             padding: 16px 18px;
             border: 1px solid rgba(25, 221, 255, .16);
             border-radius: 8px;
-            background: rgba(0, 0, 0, .52);
+            background: rgba(0, 0, 0, .56);
             backdrop-filter: blur(10px);
             box-shadow:
                 0 0 30px rgba(25, 221, 255, .05),
                 inset 0 0 25px rgba(25, 221, 255, .025);
-            font-family: "Courier New", Consolas, monospace;
             font-size: 12px;
-            line-height: 1.85;
+            line-height: 1.9;
             color: #8098ba;
         }
 
-        .status-title {
+        .status-title,
+        .console-title {
             margin-bottom: 8px;
             color: #d7e6ff;
             font-weight: 700;
@@ -175,27 +168,19 @@ public sealed class LandingPageFunction
             text-transform: uppercase;
         }
 
-        .status-row {
-            white-space: nowrap;
-        }
-
-        .status-label {
-            color: #8098ba;
-        }
-
         .connected {
             color: var(--green);
-            text-shadow: 0 0 9px rgba(57, 255, 154, .68);
+            text-shadow: 0 0 9px rgba(57,255,154,.68);
         }
 
         .disconnected {
             color: var(--red);
-            text-shadow: 0 0 9px rgba(255, 77, 109, .62);
+            text-shadow: 0 0 9px rgba(255,77,109,.62);
         }
 
         .checking {
             color: var(--amber);
-            text-shadow: 0 0 8px rgba(255, 200, 87, .35);
+            text-shadow: 0 0 8px rgba(255,200,87,.35);
         }
 
         .last-check {
@@ -205,6 +190,78 @@ public sealed class LandingPageFunction
             color: #526783;
             font-size: 10px;
             letter-spacing: .08em;
+        }
+
+        .console {
+            position: absolute;
+            left: 50%;
+            top: 53%;
+            transform: translate(-50%, -50%);
+            width: min(760px, 78vw);
+            padding: 24px;
+            border: 1px solid rgba(25, 221, 255, .16);
+            border-radius: 10px;
+            background: rgba(0, 0, 0, .58);
+            box-shadow:
+                0 0 60px rgba(25,221,255,.06),
+                inset 0 0 35px rgba(138,77,255,.025);
+            backdrop-filter: blur(12px);
+        }
+
+        .prompt {
+            color: var(--cyan);
+            margin-bottom: 12px;
+            text-shadow: 0 0 8px rgba(25,221,255,.35);
+        }
+
+        .endpoint-select {
+            width: 100%;
+            padding: 13px 14px;
+            border: 1px solid rgba(25, 221, 255, .24);
+            border-radius: 6px;
+            background: #03070c;
+            color: #d7e6ff;
+            font: inherit;
+            outline: none;
+        }
+
+        .endpoint-select:focus {
+            border-color: rgba(25,221,255,.55);
+            box-shadow: 0 0 18px rgba(25,221,255,.08);
+        }
+
+        .endpoint-details {
+            margin-top: 18px;
+            min-height: 125px;
+            padding: 16px;
+            border-left: 2px solid rgba(25,221,255,.28);
+            background: rgba(11, 18, 30, .36);
+            color: #8ea6c9;
+            line-height: 1.8;
+        }
+
+        .method {
+            display: inline-block;
+            min-width: 48px;
+            margin-right: 8px;
+            font-weight: 700;
+        }
+
+        .get {
+            color: var(--green);
+        }
+
+        .post {
+            color: var(--violet);
+        }
+
+        .path {
+            color: #e2edff;
+        }
+
+        .description {
+            margin-top: 8px;
+            color: #7189aa;
         }
 
         .version {
@@ -232,54 +289,60 @@ public sealed class LandingPageFunction
             animation: blink 2.1s ease-in-out infinite;
         }
 
-        .scanline {
-            position: fixed;
-            left: 0;
-            right: 0;
-            height: 1px;
-            top: -2px;
-            background: linear-gradient(
-                90deg,
-                transparent 10%,
-                rgba(25, 221, 255, .22),
-                rgba(138, 77, 255, .18),
-                transparent 90%
-            );
-            box-shadow: 0 0 8px rgba(25, 221, 255, .14);
-            animation: scan 8s linear infinite;
-            pointer-events: none;
-        }
-
-        @keyframes float {
-            0%, 100% { transform: translateY(0) scale(1); }
-            50% { transform: translateY(-8px) scale(1.003); }
-        }
-
-        @keyframes glow {
-            from { opacity: .72; transform: scale(.98); }
-            to { opacity: 1; transform: scale(1.035); }
-        }
-
         @keyframes blink {
             0%, 100% { opacity: .62; }
             50% { opacity: 1; }
         }
 
         @keyframes scan {
-            from { transform: translateY(0); opacity: 0; }
-            8% { opacity: 1; }
-            92% { opacity: 1; }
-            to { transform: translateY(100vh); opacity: 0; }
+            from {
+                transform: translateY(0);
+                opacity: 0;
+            }
+
+            8% {
+                opacity: 1;
+            }
+
+            92% {
+                opacity: 1;
+            }
+
+            to {
+                transform: translateY(100vh);
+                opacity: 0;
+            }
         }
 
         @keyframes atmosphere {
-            from { transform: scale(1) rotate(0deg); opacity: .82; }
-            to { transform: scale(1.06) rotate(.8deg); opacity: 1; }
+            from {
+                transform: scale(1);
+                opacity: .82;
+            }
+
+            to {
+                transform: scale(1.06);
+                opacity: 1;
+            }
         }
 
-        @media (max-width: 700px) {
-            .hero {
-                width: min(1100px, 96vw);
+        @media (max-width: 820px) {
+            .brand {
+                width: 220px;
+                left: 16px;
+                top: 16px;
+            }
+
+            .status-panel {
+                top: 140px;
+                right: 12px;
+                left: 12px;
+                min-width: 0;
+            }
+
+            .console {
+                top: 64%;
+                width: 92vw;
             }
 
             .version {
@@ -287,18 +350,12 @@ public sealed class LandingPageFunction
                 bottom: 14px;
                 font-size: 9px;
             }
-
-            .status-panel {
-                top: 12px;
-                right: 12px;
-                left: 12px;
-                min-width: 0;
-                font-size: 10px;
-            }
         }
 
         @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after {
+            *,
+            *::before,
+            *::after {
                 animation: none !important;
             }
         }
@@ -309,22 +366,22 @@ public sealed class LandingPageFunction
     <div class="grid" aria-hidden="true"></div>
     <div class="scanline" aria-hidden="true"></div>
 
+    <div class="brand">
+        <img src="/pulse-api-logo" alt="Project Pulse" />
+        <div class="api-tag">API // MOCK CLAIMS INTERFACE</div>
+    </div>
+
     <div class="status-panel">
-        <div class="status-title">SYSTEM STATUS</div>
+        <div class="status-title">API SYSTEM STATUS</div>
 
-        <div class="status-row">
-            <span class="status-label">Checking Claims API / SQL..... </span>
-            <span id="appApi" class="checking">&lt;CHECKING...&gt;</span>
+        <div>
+            Checking Function API........
+            <span id="apiStatus" class="checking">&lt;CHECKING...&gt;</span>
         </div>
 
-        <div class="status-row">
-            <span class="status-label">Checking APIM / Backend....... </span>
-            <span id="apim" class="checking">&lt;CHECKING...&gt;</span>
-        </div>
-
-        <div class="status-row">
-            <span class="status-label">Checking Service Bus.......... </span>
-            <span id="serviceBus" class="checking">&lt;CHECKING...&gt;</span>
+        <div>
+            Checking Table Storage.......
+            <span id="storageStatus" class="checking">&lt;CHECKING...&gt;</span>
         </div>
 
         <div class="last-check" id="lastCheck">
@@ -332,99 +389,279 @@ public sealed class LandingPageFunction
         </div>
     </div>
 
-    <main class="shell">
-        <section class="hero" aria-label="Project Pulse">
-            <div class="logo-wrap">
-                <img class="logo" src="/pulse-logo" alt="Project Pulse" />
-            </div>
-        </section>
-    </main>
+    <section class="console" aria-label="Project Pulse API endpoints">
+        <div class="console-title">API COMMAND CONSOLE</div>
+
+        <div class="prompt">
+            pulse-api&gt; select endpoint
+        </div>
+
+        <select id="endpointSelect"
+                class="endpoint-select"
+                aria-label="API endpoint selector">
+
+            <option value="health">
+                GET /health
+            </option>
+
+            <option value="pending">
+                GET /claims/pending?maxRecords=100
+            </option>
+
+            <option value="byid">
+                GET /claims/{uniqueId}
+            </option>
+
+            <option value="submit">
+                POST /claims
+            </option>
+
+            <option value="result">
+                POST /claims/{uniqueId}/result
+            </option>
+        </select>
+
+        <div id="endpointDetails"
+             class="endpoint-details">
+        </div>
+    </section>
 
     <div class="version"
-         aria-label="Project Pulse version {{version}}, environment {{environment}}">
-        <span class="dot" aria-hidden="true"></span>
+         aria-label="Project Pulse API version {{version}}, environment {{environment}}">
+
+        <span class="dot"
+              aria-hidden="true">
+        </span>
+
         <span>
-            Project Pulse&nbsp;&nbsp;v{{version}}&nbsp;&nbsp;•&nbsp;&nbsp;{{environment}}
+            Project Pulse API&nbsp;&nbsp;v{{version}}&nbsp;&nbsp;•&nbsp;&nbsp;{{environment}}
         </span>
     </div>
 
     <script>
+        const endpoints = {
+            health: {
+                method: 'GET',
+                cls: 'get',
+                path: '/health',
+                description:
+                    'Checks the Project Pulse API and its Table Storage dependency.'
+            },
+
+            pending: {
+                method: 'GET',
+                cls: 'get',
+                path: '/claims/pending?maxRecords=100',
+                description:
+                    'Returns up to TOP N pending fake claims for the Project Pulse poller.'
+            },
+
+            byid: {
+                method: 'GET',
+                cls: 'get',
+                path: '/claims/{uniqueId}',
+                description:
+                    'Retrieves a previously generated or submitted claim by its unique ID.'
+            },
+
+            submit: {
+                method: 'POST',
+                cls: 'post',
+                path: '/claims',
+                description:
+                    'Submits a fake claim. If the body is empty, FAKE_CLAIM_JSON is used as the template.'
+            },
+
+            result: {
+                method: 'POST',
+                cls: 'post',
+                path: '/claims/{uniqueId}/result',
+                description:
+                    'Stores a simulated adjudication response for a claim.'
+            }
+        };
+
+        function renderEndpoint() {
+            const selected =
+                endpoints[
+                    document.getElementById('endpointSelect').value
+                ];
+
+            document.getElementById('endpointDetails').innerHTML =
+                '<div>' +
+                '<span class="method ' +
+                selected.cls +
+                '">' +
+                selected.method +
+                '</span>' +
+                '<span class="path">' +
+                selected.path +
+                '</span>' +
+                '</div>' +
+                '<div class="description">' +
+                selected.description +
+                '</div>';
+        }
+
         function setStatus(id, connected) {
-            const element = document.getElementById(id);
+            const element =
+                document.getElementById(id);
 
-            if (connected) {
-                element.className = 'connected';
-                element.textContent = '<CONNECTED>';
-            } else {
-                element.className = 'disconnected';
-                element.textContent = '<DISCONNECTED>';
-            }
+            element.className =
+                connected
+                    ? 'connected'
+                    : 'disconnected';
+
+            element.textContent =
+                connected
+                    ? '<CONNECTED>'
+                    : '<DISCONNECTED>';
         }
 
-        function setChecking() {
-            for (const id of ['appApi', 'apim', 'serviceBus']) {
-                const element = document.getElementById(id);
-                element.className = 'checking';
-                element.textContent = '<CHECKING...>';
-            }
-        }
+        async function checkHealth() {
+            const api =
+                document.getElementById('apiStatus');
 
-        async function checkPulseHealth() {
-            setChecking();
+            const storage =
+                document.getElementById('storageStatus');
+
+            api.className =
+                storage.className =
+                    'checking';
+
+            api.textContent =
+                storage.textContent =
+                    '<CHECKING...>';
 
             try {
-                const response = await fetch('/pulse-health', {
-                    method: 'GET',
-                    cache: 'no-store'
-                });
+                const response =
+                    await fetch(
+                        '/health',
+                        {
+                            cache: 'no-store'
+                        });
 
-                if (!response.ok) {
-                    throw new Error(
-                        'Health endpoint returned ' + response.status
-                    );
-                }
+                const data =
+                    await response.json();
 
-                const data = await response.json();
+                setStatus(
+                    'apiStatus',
+                    response.ok);
 
-                setStatus('appApi', data.appApi);
-                setStatus('apim', data.apim);
-                setStatus('serviceBus', data.serviceBus);
+                setStatus(
+                    'storageStatus',
+                    data.storage === true);
 
-                document.getElementById('lastCheck').textContent =
-                    'LAST CHECK: ' + new Date().toLocaleTimeString();
+                document
+                    .getElementById('lastCheck')
+                    .textContent =
+                        'LAST CHECK: ' +
+                        new Date()
+                            .toLocaleTimeString();
             }
             catch {
-                setStatus('appApi', false);
-                setStatus('apim', false);
-                setStatus('serviceBus', false);
+                setStatus(
+                    'apiStatus',
+                    false);
 
-                document.getElementById('lastCheck').textContent =
-                    'LAST CHECK: ' +
-                    new Date().toLocaleTimeString() +
-                    ' | HEALTH ENDPOINT UNAVAILABLE';
+                setStatus(
+                    'storageStatus',
+                    false);
+
+                document
+                    .getElementById('lastCheck')
+                    .textContent =
+                        'LAST CHECK: ' +
+                        new Date()
+                            .toLocaleTimeString() +
+                        ' | HEALTH ENDPOINT UNAVAILABLE';
             }
         }
 
-        checkPulseHealth();
+        document
+            .getElementById('endpointSelect')
+            .addEventListener(
+                'change',
+                renderEndpoint);
 
-        setInterval(checkPulseHealth, 5000);
+        renderEndpoint();
+        checkHealth();
+
+        setInterval(
+            checkHealth,
+            5000);
     </script>
 </body>
 </html>
 """;
 
-        await response.WriteStringAsync(html, Encoding.UTF8);
+        await response.WriteStringAsync(
+            html,
+            Encoding.UTF8);
+
         return response;
     }
 
-    [Function("PulseLogo")]
+    [Function("PulseApiLogo")]
     public async Task<HttpResponseData> Logo(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse-logo")]
+        [HttpTrigger(
+            AuthorizationLevel.Anonymous,
+            "get",
+            Route = "pulse-api-logo")]
         HttpRequestData request)
     {
-        var response = request.CreateResponse(HttpStatusCode.OK);
+        var assembly =
+            Assembly.GetExecutingAssembly();
 
-        response.Headers.Add("Content-Type", "image/png");
+        var resources =
+            assembly.GetManifestResourceNames();
+
+        var resourceName =
+            resources.FirstOrDefault(
+                name =>
+                    name.EndsWith(
+                        "project-pulse-logo.png",
+                        StringComparison.OrdinalIgnoreCase));
+
+        if (resourceName is null)
+        {
+            var debug =
+                request.CreateResponse(
+                    HttpStatusCode.NotFound);
+
+            await debug.WriteStringAsync(
+                "Embedded resources: " +
+                string.Join(
+                    ", ",
+                    resources));
+
+            return debug;
+        }
+
+        await using var resource =
+            assembly.GetManifestResourceStream(
+                resourceName);
+
+        if (resource is null)
+        {
+            var debug =
+                request.CreateResponse(
+                    HttpStatusCode.NotFound);
+
+            await debug.WriteStringAsync(
+                $"Resource found but stream could not be opened: {resourceName}");
+
+            return debug;
+        }
+
+        var response =
+            request.CreateResponse(
+                HttpStatusCode.OK);
+
+        response.Headers.Add(
+            "Content-Type",
+            "image/png");
+
         response.Headers.Add(
             "Cache-Control",
             "public, max-age=86400, immutable");
@@ -433,29 +670,8 @@ public sealed class LandingPageFunction
             "X-Content-Type-Options",
             "nosniff");
 
-        var assembly = Assembly.GetExecutingAssembly();
-
-        var resourceName = assembly
-            .GetManifestResourceNames()
-            .FirstOrDefault(name =>
-                name.EndsWith(
-                    "project-pulse-logo.png",
-                    StringComparison.OrdinalIgnoreCase));
-
-        if (resourceName is null)
-        {
-            return request.CreateResponse(HttpStatusCode.NotFound);
-        }
-
-        await using var resource =
-            assembly.GetManifestResourceStream(resourceName);
-
-        if (resource is null)
-        {
-            return request.CreateResponse(HttpStatusCode.NotFound);
-        }
-
-        await resource.CopyToAsync(response.Body);
+        await resource.CopyToAsync(
+            response.Body);
 
         return response;
     }
