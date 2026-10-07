@@ -16,8 +16,19 @@ public sealed class LandingPageFunction
     {
         var normalizedPath = (path ?? string.Empty).Trim('/');
 
+        // Serve logo directly through the same catch-all route.
+        if (normalizedPath.Equals(
+            "pulse-logo",
+            StringComparison.OrdinalIgnoreCase))
+        {
+            return await ServeLogoAsync(request);
+        }
+
+        // Only root and /pulse render the landing page.
         if (!string.IsNullOrEmpty(normalizedPath) &&
-            !normalizedPath.Equals("pulse", StringComparison.OrdinalIgnoreCase))
+            !normalizedPath.Equals(
+                "pulse",
+                StringComparison.OrdinalIgnoreCase))
         {
             return request.CreateResponse(HttpStatusCode.NotFound);
         }
@@ -60,9 +71,7 @@ public sealed class LandingPageFunction
             --amber: #ffc857;
         }
 
-        * {
-            box-sizing: border-box;
-        }
+        * { box-sizing: border-box; }
 
         html, body {
             width: 100%;
@@ -298,7 +307,9 @@ public sealed class LandingPageFunction
         }
 
         @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after {
+            *,
+            *::before,
+            *::after {
                 animation: none !important;
             }
         }
@@ -406,7 +417,6 @@ public sealed class LandingPageFunction
         }
 
         checkPulseHealth();
-
         setInterval(checkPulseHealth, 5000);
     </script>
 </body>
@@ -417,22 +427,9 @@ public sealed class LandingPageFunction
         return response;
     }
 
-    [Function("PulseLogo")]
-    public async Task<HttpResponseData> Logo(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse-logo")]
+    private static async Task<HttpResponseData> ServeLogoAsync(
         HttpRequestData request)
     {
-        var response = request.CreateResponse(HttpStatusCode.OK);
-
-        response.Headers.Add("Content-Type", "image/png");
-        response.Headers.Add(
-            "Cache-Control",
-            "public, max-age=86400, immutable");
-
-        response.Headers.Add(
-            "X-Content-Type-Options",
-            "nosniff");
-
         var assembly = Assembly.GetExecutingAssembly();
 
         var resourceName = assembly
@@ -444,7 +441,10 @@ public sealed class LandingPageFunction
 
         if (resourceName is null)
         {
-            return request.CreateResponse(HttpStatusCode.NotFound);
+            var notFound = request.CreateResponse(HttpStatusCode.NotFound);
+            await notFound.WriteStringAsync(
+                "Project Pulse logo resource was not found.");
+            return notFound;
         }
 
         await using var resource =
@@ -452,8 +452,21 @@ public sealed class LandingPageFunction
 
         if (resource is null)
         {
-            return request.CreateResponse(HttpStatusCode.NotFound);
+            var notFound = request.CreateResponse(HttpStatusCode.NotFound);
+            await notFound.WriteStringAsync(
+                "Project Pulse logo resource could not be opened.");
+            return notFound;
         }
+
+        var response = request.CreateResponse(HttpStatusCode.OK);
+
+        response.Headers.Add("Content-Type", "image/png");
+        response.Headers.Add(
+            "Cache-Control",
+            "public, max-age=86400, immutable");
+        response.Headers.Add(
+            "X-Content-Type-Options",
+            "nosniff");
 
         await resource.CopyToAsync(response.Body);
 
