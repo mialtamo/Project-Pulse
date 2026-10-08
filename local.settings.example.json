@@ -4,14 +4,11 @@
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
     "AzureWebJobsDisableHomepage": "true",
-
     "PROJECT_PULSE_VERSION": "0.2.0",
     "PROJECT_PULSE_ENVIRONMENT": "POC",
-
     "POLL_SCHEDULE": "0 * * * * *",
     "RtaPageSize": "100",
     "RtaPagesPerPoll": "1",
-
     "AppApiBaseUrl": "https://rta-api.example.com",
     "AppApiTimeoutSeconds": "10",
     "AppApiScope": "api://YOUR-RTA-API-APP-ID/.default",
@@ -20,7 +17,6 @@
     "RtaDbHealthPath": "/healthchecks/db/app",
     "RtaStatusPathTemplate": "/requests/{correlationId}/status",
     "RtaStatusWritebackEnabled": "false",
-
     "ApimBaseUrl": "https://claims-api.example.com",
     "ApimHealthPath": "/health",
     "ApimAdjudicationPath": "/claims/adjudicate",
@@ -28,22 +24,21 @@
     "ApimScope": "api://YOUR-APIM-PROTECTED-API-APP-ID/.default",
     "ApimBatchRootProperty": "claims",
     "ApimFieldMapping": "{\"correlationId\":\"CORRELATION_ID\",\"requestId\":\"REQUEST_ID\",\"idempotencyKey\":\"IDEMPOTENCY_KEY\",\"requestType\":\"REQUEST_TYPE\",\"patientIcn\":\"METADATA.PATIENT_ICN\",\"sponsorIcn\":\"METADATA.SPONSOR_ICN\",\"startDateOfService\":\"METADATA.START_DATE_OF_SERVICE\",\"endDateOfService\":\"METADATA.END_DATE_OF_SERVICE\",\"program\":\"METADATA.PROGRAM\",\"includeAdjustmentDetails\":\"METADATA.INCLUDE_ADJUSTMENT_DETAILS\"}",
-
     "CorrelationIdField": "CORRELATION_ID",
-
     "RetryHttpStatusCodes": "404,408,429,500,502,503,504",
     "JsonResponseCodeField": "ResponseCode",
     "JsonRetryCodes": "",
     "JsonAlertCodes": "419",
-
     "ServiceBusFullyQualifiedNamespace": "sb-pulse-dev.servicebus.windows.net",
     "ServiceBusQueueName": "pulse-claim-retry",
     "ServiceBusMessageTtlMinutes": "10",
-
     "CircuitFailureThreshold": "5",
     "CircuitOpenSeconds": "30",
-
     "ResultWriteMaxAttempts": "3",
-    "ResultWriteRetryDelayMilliseconds": "500"
+    "ResultWriteRetryDelayMilliseconds": "500",
+    "APP_API_MODE": "RTA",
+    "LOG_POLL_PAYLOADS": "false",
+    "APIM_OUTAGE_MODE": "BUFFER_THEN_STOP",
+    "APIM_OUTAGE_POLL_STOP_SECONDS": "300"
   }
 }
