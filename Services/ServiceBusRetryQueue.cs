@@ -27,30 +27,63 @@ public sealed class ServiceBusRetryQueue : IRetryQueue, IAsyncDisposable
         _sender = client.CreateSender(_options.ServiceBusQueueName);
     }
 
-    public async Task EnqueueAsync(string uniqueId, string reason, CancellationToken cancellationToken)
+    public async Task EnqueueAsync(RetryEnvelope envelope, CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.Serialize(new RetryEnvelope(uniqueId));
+        var payload = JsonSerializer.Serialize(envelope);
         var message = new ServiceBusMessage(payload)
         {
             ContentType = "application/json",
-            MessageId = uniqueId,
-            CorrelationId = uniqueId,
+            MessageId = envelope.UniqueId,
+            CorrelationId = envelope.UniqueId,
             TimeToLive = TimeSpan.FromMinutes(_options.ServiceBusMessageTtlMinutes),
             Subject = "ClaimRetry"
         };
 
-        message.ApplicationProperties["reason"] = reason;
+        message.ApplicationProperties["reason"] = envelope.Reason;
+        if (!string.IsNullOrWhiteSpace(envelope.RequestId))
+        {
+            message.ApplicationProperties["requestId"] = envelope.RequestId;
+        }
 
-        await _sender.SendMessageAsync(message, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(envelope.IdempotencyKey))
+        {
+            message.ApplicationProperties["idempotencyKey"] = envelope.IdempotencyKey;
+        }
+
+        try
+        {
+            await _sender.SendMessageAsync(message, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _telemetry.TrackException(ex, new Dictionary<string, string>
+            {
+                ["uniqueId"] = envelope.UniqueId,
+                ["reason"] = envelope.Reason,
+                ["queue"] = _options.ServiceBusQueueName
+            });
+
+            _logger.LogError(
+                ex,
+                "Service Bus buffering failed for claim {UniqueId}. Queue={Queue} Reason={Reason}",
+                envelope.UniqueId,
+                _options.ServiceBusQueueName,
+                envelope.Reason);
+
+            throw;
+        }
 
         _telemetry.TrackEvent("ClaimQueuedForRetry", new Dictionary<string, string>
         {
-            ["uniqueId"] = uniqueId,
-            ["reason"] = reason,
+            ["uniqueId"] = envelope.UniqueId,
+            ["reason"] = envelope.Reason,
             ["ttlMinutes"] = _options.ServiceBusMessageTtlMinutes.ToString()
         });
 
-        _logger.LogWarning("Claim {UniqueId} queued for retry. Reason={Reason}", uniqueId, reason);
+        _logger.LogWarning(
+            "Claim {UniqueId} buffered to Service Bus. Reason={Reason}",
+            envelope.UniqueId,
+            envelope.Reason);
     }
 
     public async ValueTask DisposeAsync() => await _sender.DisposeAsync();

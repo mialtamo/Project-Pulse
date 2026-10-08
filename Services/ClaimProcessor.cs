@@ -17,6 +17,7 @@ public sealed class ClaimProcessor(
     IRetryQueue retryQueue,
     PayloadTransformer transformer,
     OutboundCircuitBreaker circuitBreaker,
+    ApimOutageTracker outageTracker,
     IOptions<ClaimProcessorOptions> options,
     TelemetryClient telemetry,
     ILogger<ClaimProcessor> logger) : IClaimProcessor
@@ -25,6 +26,43 @@ public sealed class ClaimProcessor(
     private readonly HashSet<int> _retryHttpCodes = options.Value.GetRetryHttpStatusCodeSet();
     private readonly HashSet<string> _jsonRetryCodes = options.Value.GetJsonRetryCodeSet();
     private readonly HashSet<string> _jsonAlertCodes = options.Value.GetJsonAlertCodeSet();
+
+    public async Task<IReadOnlyList<ClaimProcessingResult>> BufferBatchAsync(
+        IReadOnlyList<JsonElement> claims,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        if (claims.Count == 0)
+        {
+            return [];
+        }
+
+        var transformed = TransformClaims(claims);
+
+        try
+        {
+            await QueueAllAsync(claims, transformed, reason, cancellationToken);
+        }
+        catch
+        {
+            outageTracker.RecordBufferFailure();
+            throw;
+        }
+
+        var ids = claims.Select(GetCorrelationId).ToArray();
+        telemetry.TrackEvent("ClaimBatchBufferedToServiceBus", new Dictionary<string, string>
+        {
+            ["recordCount"] = claims.Count.ToString(),
+            ["reason"] = reason
+        });
+
+        logger.LogWarning(
+            "Buffered {Count} RTA record(s) to Service Bus because APIM is unavailable. Reason={Reason}",
+            claims.Count,
+            reason);
+
+        return BuildResults(ids, ClaimProcessingDisposition.QueuedForRetry, reason);
+    }
 
     public async Task<IReadOnlyList<ClaimProcessingResult>> ProcessBatchAsync(
         IReadOnlyList<JsonElement> claims,
@@ -36,7 +74,9 @@ public sealed class ClaimProcessor(
         }
 
         var correlationIds = claims.Select(GetCorrelationId).ToArray();
+        var transformedClaims = TransformClaims(claims);
         var batchId = Guid.NewGuid().ToString("N");
+
         using var operation = telemetry.StartOperation<Microsoft.ApplicationInsights.DataContracts.RequestTelemetry>("ClaimBatchAdjudication");
         operation.Telemetry.Properties["batchId"] = batchId;
         operation.Telemetry.Properties["recordCount"] = claims.Count.ToString();
@@ -44,20 +84,37 @@ public sealed class ClaimProcessor(
 
         if (!circuitBreaker.CanAttempt())
         {
-            await QueueAllAsync(correlationIds, "OutboundCircuitOpen", cancellationToken);
+            try
+            {
+                await QueueAllAsync(claims, transformedClaims, "OutboundCircuitOpen", cancellationToken);
+            }
+            catch
+            {
+                outageTracker.RecordBufferFailure();
+                throw;
+            }
+
             CompleteTelemetry(operation.Telemetry, false, "CircuitOpen", stopwatch.ElapsedMilliseconds);
             return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "OutboundCircuitOpen");
         }
 
-        var transformed = new JsonArray();
-        foreach (var claim in claims)
+        var transformedArray = new JsonArray();
+        foreach (var transformed in transformedClaims)
         {
-            transformed.Add(transformer.Transform(claim));
+            transformedArray.Add(transformed.DeepClone());
         }
 
         JsonNode outboundPayload = string.IsNullOrWhiteSpace(_options.ApimBatchRootProperty)
-            ? transformed
-            : new JsonObject { [_options.ApimBatchRootProperty] = transformed };
+            ? transformedArray
+            : new JsonObject { [_options.ApimBatchRootProperty] = transformedArray };
+
+        if (_options.ShouldLogPollPayloads())
+        {
+            logger.LogInformation(
+                "APIM outbound batch {BatchId} payload: {Payload}",
+                batchId,
+                outboundPayload.ToJsonString());
+        }
 
         var client = httpClientFactory.CreateClient("Apim");
         using var request = new HttpRequestMessage(HttpMethod.Post, _options.ApimAdjudicationPath)
@@ -82,10 +139,20 @@ public sealed class ClaimProcessor(
             if (!response.IsSuccessStatusCode)
             {
                 circuitBreaker.RecordFailure();
+                outageTracker.RecordApimFailure();
 
                 if (_retryHttpCodes.Contains(statusCode))
                 {
-                    await QueueAllAsync(correlationIds, $"Http{statusCode}", cancellationToken);
+                    try
+                    {
+                        await QueueAllAsync(claims, transformedClaims, $"Http{statusCode}", cancellationToken);
+                    }
+                    catch
+                    {
+                        outageTracker.RecordBufferFailure();
+                        throw;
+                    }
+
                     CompleteTelemetry(operation.Telemetry, false, $"HTTP {statusCode}", stopwatch.ElapsedMilliseconds);
                     return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, $"Http{statusCode}", statusCode);
                 }
@@ -101,11 +168,21 @@ public sealed class ClaimProcessor(
             }
 
             circuitBreaker.RecordSuccess();
+            outageTracker.RecordApimSuccess();
             var businessCode = TryGetBusinessCode(responseJson);
 
             if (!string.IsNullOrWhiteSpace(businessCode) && _jsonRetryCodes.Contains(businessCode))
             {
-                await QueueAllAsync(correlationIds, $"JsonCode:{businessCode}", cancellationToken);
+                try
+                {
+                    await QueueAllAsync(claims, transformedClaims, $"JsonCode:{businessCode}", cancellationToken);
+                }
+                catch
+                {
+                    outageTracker.RecordBufferFailure();
+                    throw;
+                }
+
                 CompleteTelemetry(operation.Telemetry, false, $"JSON {businessCode}", stopwatch.ElapsedMilliseconds);
                 return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "JsonRetryCode", statusCode, businessCode);
             }
@@ -147,15 +224,37 @@ public sealed class ClaimProcessor(
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             circuitBreaker.RecordFailure();
-            await QueueAllAsync(correlationIds, "ApimTimeout", cancellationToken);
+            outageTracker.RecordApimFailure();
+
+            try
+            {
+                await QueueAllAsync(claims, transformedClaims, "ApimTimeout", cancellationToken);
+            }
+            catch
+            {
+                outageTracker.RecordBufferFailure();
+                throw;
+            }
+
             CompleteTelemetry(operation.Telemetry, false, "Timeout", stopwatch.ElapsedMilliseconds);
             return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "ApimTimeout");
         }
         catch (HttpRequestException ex)
         {
             circuitBreaker.RecordFailure();
+            outageTracker.RecordApimFailure();
             var statusCode = ex.StatusCode.HasValue ? (int)ex.StatusCode.Value : (int?)null;
-            await QueueAllAsync(correlationIds, "NetworkFailure", cancellationToken);
+
+            try
+            {
+                await QueueAllAsync(claims, transformedClaims, "NetworkFailure", cancellationToken);
+            }
+            catch
+            {
+                outageTracker.RecordBufferFailure();
+                throw;
+            }
+
             logger.LogWarning(ex, "Network failure while processing APIM batch {BatchId}", batchId);
             CompleteTelemetry(operation.Telemetry, false, "NetworkFailure", stopwatch.ElapsedMilliseconds);
             return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "NetworkFailure", statusCode);
@@ -169,40 +268,79 @@ public sealed class ClaimProcessor(
         }
     }
 
+    private IReadOnlyList<JsonObject> TransformClaims(IReadOnlyList<JsonElement> claims) =>
+        claims.Select(transformer.Transform).ToArray();
+
     private string GetCorrelationId(JsonElement claim)
     {
-        if (claim.ValueKind != JsonValueKind.Object ||
-            !claim.TryGetProperty(_options.CorrelationIdField, out var value))
+        if (TryGetScalar(claim, _options.CorrelationIdField, out var configured))
         {
-            throw new InvalidOperationException(
-                $"Queued request JSON does not contain configured correlation ID field '{_options.CorrelationIdField}'.");
+            return configured;
         }
 
-        var correlationId = value.ValueKind switch
+        if (_options.IsMockApiMode())
         {
-            JsonValueKind.String => value.GetString(),
-            JsonValueKind.Number => value.GetRawText(),
-            _ => value.ToString()
-        };
-
-        if (string.IsNullOrWhiteSpace(correlationId))
-        {
-            throw new InvalidOperationException(
-                $"Queued request correlation ID field '{_options.CorrelationIdField}' is empty.");
+            if (TryGetScalar(claim, "uniqueId", out var mockId) ||
+                TryGetScalar(claim, "UniqueId", out mockId))
+            {
+                return mockId;
+            }
         }
 
-        return correlationId;
+        if (TryGetScalar(claim, "CORRELATION_ID", out var rtaId))
+        {
+            return rtaId;
+        }
+
+        throw new InvalidOperationException(
+            $"Queued request JSON does not contain configured correlation ID field '{_options.CorrelationIdField}'.");
     }
 
     private async Task QueueAllAsync(
-        IEnumerable<string> correlationIds,
+        IReadOnlyList<JsonElement> claims,
+        IReadOnlyList<JsonObject> transformedClaims,
         string reason,
         CancellationToken cancellationToken)
     {
-        foreach (var correlationId in correlationIds)
+        for (var i = 0; i < claims.Count; i++)
         {
-            await retryQueue.EnqueueAsync(correlationId, reason, cancellationToken);
+            var claim = claims[i];
+            var uniqueId = GetCorrelationId(claim);
+            TryGetScalar(claim, "REQUEST_ID", out var requestId);
+            TryGetScalar(claim, "IDEMPOTENCY_KEY", out var idempotencyKey);
+
+            var envelope = new RetryEnvelope(
+                uniqueId,
+                string.IsNullOrWhiteSpace(requestId) ? null : requestId,
+                string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey,
+                reason,
+                DateTimeOffset.UtcNow,
+                claim.GetRawText(),
+                transformedClaims[i].ToJsonString());
+
+            await retryQueue.EnqueueAsync(envelope, cancellationToken);
         }
+    }
+
+    private static bool TryGetScalar(JsonElement claim, string fieldName, out string value)
+    {
+        value = string.Empty;
+        if (claim.ValueKind != JsonValueKind.Object ||
+            !claim.TryGetProperty(fieldName, out var element))
+        {
+            return false;
+        }
+
+        value = element.ValueKind switch
+        {
+            JsonValueKind.String => element.GetString() ?? string.Empty,
+            JsonValueKind.Number => element.GetRawText(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            _ => element.ToString()
+        };
+
+        return !string.IsNullOrWhiteSpace(value);
     }
 
     private async Task<bool> WriteBatchResultsAsync(

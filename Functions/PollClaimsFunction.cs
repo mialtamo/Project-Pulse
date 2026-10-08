@@ -10,6 +10,7 @@ public sealed class PollClaimsFunction(
     IHealthGate healthGate,
     IAppApiClient appApiClient,
     IClaimProcessor claimProcessor,
+    ApimOutageTracker outageTracker,
     TelemetryClient telemetry,
     ILogger<PollClaimsFunction> logger)
 {
@@ -24,20 +25,54 @@ public sealed class PollClaimsFunction(
         logger.LogInformation("RTA queued request poll started. Schedule status: {ScheduleStatus}", timerInfo.ScheduleStatus);
 
         var (rtaHealth, apimHealth) = await healthGate.CheckAsync(cancellationToken);
-        if (!rtaHealth.IsHealthy || !apimHealth.IsHealthy)
+
+        if (!rtaHealth.IsHealthy)
         {
-            telemetry.TrackEvent("ClaimPollSkippedDependencyUnhealthy", new Dictionary<string, string>
+            telemetry.TrackEvent("ClaimPollSkippedRtaUnhealthy", new Dictionary<string, string>
+            {
+                ["runId"] = runId
+            });
+
+            logger.LogWarning("Poll skipped because RTA API/DB health is unhealthy");
+            return;
+        }
+
+        var outageDecision = outageTracker.Evaluate(apimHealth.IsHealthy);
+
+        if (outageDecision.OutageStarted)
+        {
+            logger.LogWarning(
+                "APIM outage detected. Mode decision={Action}. Temporary buffering window started",
+                outageDecision.Action);
+        }
+
+        if (outageDecision.Recovered)
+        {
+            logger.LogInformation("APIM recovered. Normal RTA polling and APIM delivery resumed");
+            telemetry.TrackEvent("ApimRecovered");
+        }
+
+        if (outageDecision.Action == ApimOutageAction.StopPolling)
+        {
+            telemetry.TrackEvent("ClaimPollSuspendedForApimOutage", new Dictionary<string, string>
             {
                 ["runId"] = runId,
-                ["rtaHealthy"] = rtaHealth.IsHealthy.ToString(),
-                ["apimHealthy"] = apimHealth.IsHealthy.ToString()
+                ["outageSeconds"] = Math.Round(outageDecision.OutageSeconds).ToString(),
+                ["reason"] = outageDecision.Reason
             });
 
             logger.LogWarning(
-                "Poll skipped because a dependency is unhealthy. RTA={RtaHealthy}, APIM/Backend={ApimHealthy}",
-                rtaHealth.IsHealthy,
-                apimHealth.IsHealthy);
+                "RTA polling suspended. APIM outage duration={OutageSeconds:F0}s Reason={Reason}",
+                outageDecision.OutageSeconds,
+                outageDecision.Reason);
             return;
+        }
+
+        if (outageDecision.Action == ApimOutageAction.BufferToServiceBus)
+        {
+            logger.LogWarning(
+                "APIM unhealthy for {OutageSeconds:F0}s. RTA polling will continue temporarily and records will be buffered to Service Bus",
+                outageDecision.OutageSeconds);
         }
 
         IReadOnlyList<System.Text.Json.JsonElement> claims;
@@ -54,18 +89,27 @@ public sealed class PollClaimsFunction(
 
         if (claims.Count == 0)
         {
-            logger.LogInformation("No queued requests returned by RTA");
+            logger.LogInformation("No queued requests returned by RTA/App API");
             return;
         }
+
+        logger.LogInformation(
+            "RTA/App API returned {Count} queued record(s). DeliveryMode={DeliveryMode}",
+            claims.Count,
+            outageDecision.Action == ApimOutageAction.BufferToServiceBus ? "ServiceBusBuffer" : "APIM");
 
         IReadOnlyList<ClaimProcessingResult> results;
         try
         {
-            results = await claimProcessor.ProcessBatchAsync(claims, cancellationToken);
+            results = outageDecision.Action == ApimOutageAction.BufferToServiceBus
+                ? await claimProcessor.BufferBatchAsync(claims, outageDecision.Reason, cancellationToken)
+                : await claimProcessor.ProcessBatchAsync(claims, cancellationToken);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Unexpected batch processing exception. Claim payloads are intentionally not logged.");
+            logger.LogError(
+                ex,
+                "Batch processing failed. If APIM is unavailable and Service Bus buffering also failed, polling will remain suspended until APIM recovers");
             telemetry.TrackException(ex);
             return;
         }
@@ -78,7 +122,7 @@ public sealed class PollClaimsFunction(
         telemetry.TrackMetric("ClaimBatchSize", claims.Count);
 
         logger.LogInformation(
-            "Poll completed. Batched={Batched}, Completed={Completed}, Retry={Retry}, Alerted={Alerted}, WritebackFailed={WritebackFailed}",
+            "Poll completed. Batched={Batched}, Completed={Completed}, RetryBuffered={Retry}, Alerted={Alerted}, WritebackFailed={WritebackFailed}",
             claims.Count,
             summary.GetValueOrDefault(nameof(ClaimProcessingDisposition.Completed), 0),
             summary.GetValueOrDefault(nameof(ClaimProcessingDisposition.QueuedForRetry), 0),

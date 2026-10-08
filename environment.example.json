@@ -11,7 +11,9 @@
   "Polling": {
     "POLL_SCHEDULE": "0 * * * * *",
     "RtaPageSize": "100",
-    "RtaPagesPerPoll": "1"
+    "RtaPagesPerPoll": "1",
+    "APP_API_MODE": "RTA",
+    "LOG_POLL_PAYLOADS": "false"
   },
   "RtaApi": {
     "AppApiBaseUrl": "https://rta-api.example.com",
@@ -30,7 +32,9 @@
     "ApimRequestTimeoutSeconds": "15",
     "ApimScope": "api://YOUR-APIM-PROTECTED-API-APP-ID/.default",
     "ApimBatchRootProperty": "claims",
-    "ApimFieldMapping": "{\"correlationId\":\"CORRELATION_ID\",\"requestId\":\"REQUEST_ID\",\"idempotencyKey\":\"IDEMPOTENCY_KEY\",\"requestType\":\"REQUEST_TYPE\",\"patientIcn\":\"METADATA.PATIENT_ICN\",\"sponsorIcn\":\"METADATA.SPONSOR_ICN\",\"startDateOfService\":\"METADATA.START_DATE_OF_SERVICE\",\"endDateOfService\":\"METADATA.END_DATE_OF_SERVICE\",\"program\":\"METADATA.PROGRAM\",\"includeAdjustmentDetails\":\"METADATA.INCLUDE_ADJUSTMENT_DETAILS\"}"
+    "ApimFieldMapping": "{\"correlationId\":\"CORRELATION_ID\",\"requestId\":\"REQUEST_ID\",\"idempotencyKey\":\"IDEMPOTENCY_KEY\",\"requestType\":\"REQUEST_TYPE\",\"patientIcn\":\"METADATA.PATIENT_ICN\",\"sponsorIcn\":\"METADATA.SPONSOR_ICN\",\"startDateOfService\":\"METADATA.START_DATE_OF_SERVICE\",\"endDateOfService\":\"METADATA.END_DATE_OF_SERVICE\",\"program\":\"METADATA.PROGRAM\",\"includeAdjustmentDetails\":\"METADATA.INCLUDE_ADJUSTMENT_DETAILS\"}",
+    "APIM_OUTAGE_MODE": "BUFFER_THEN_STOP",
+    "APIM_OUTAGE_POLL_STOP_SECONDS": "300"
   },
   "Claims": {
     "CorrelationIdField": "CORRELATION_ID"

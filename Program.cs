@@ -50,5 +50,6 @@ builder.Services.AddSingleton<IRetryQueue, ServiceBusRetryQueue>();
 builder.Services.AddSingleton<PayloadTransformer>();
 builder.Services.AddSingleton<IClaimProcessor, ClaimProcessor>();
 builder.Services.AddSingleton<OutboundCircuitBreaker>();
+builder.Services.AddSingleton<ApimOutageTracker>();
 
 builder.Build().Run();

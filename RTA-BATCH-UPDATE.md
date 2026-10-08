@@ -1,58 +1,46 @@
-# Project Pulse RTA Batch Update
+# Project Pulse RTA polling and APIM outage behavior
 
-This update changes the processor from one-claim-at-a-time polling to the current RTA contract.
+Project Pulse polls the RTA/App API, transforms queued requests, and sends them to APIM. Project Pulse is write-only to Service Bus. A separate recovery application is responsible for consuming Service Bus messages.
 
-## RTA polling
+## APIM outage modes
 
-- `GET /requests/queued?page=N&limit=100`
-- `RtaPageSize` is clamped to 1-100.
-- `RtaPagesPerPoll` is clamped to 1-3.
-- Polling stops early when `HasNextPage` is false.
-- All returned `Items` are combined into one APIM batch.
+`APIM_OUTAGE_MODE=BUFFER_THEN_STOP` is the recommended mode.
 
-## Health gate
+- APIM healthy: poll RTA and send the transformed batch to APIM.
+- APIM unhealthy for less than `APIM_OUTAGE_POLL_STOP_SECONDS`: continue polling RTA and buffer each record to Service Bus.
+- APIM unhealthy at or beyond the threshold: stop polling RTA.
+- APIM recovery: clear the outage state and resume normal polling.
+- RTA API or DB/App unhealthy: stop polling immediately.
+- APIM unavailable and Service Bus buffering fails: stop polling until APIM recovers.
 
-Both RTA checks must return HTTP success and `{ "IS_HEALTHY": true }`:
+Other supported modes:
 
-- `GET /healthchecks`
-- `GET /healthchecks/db/app`
+- `STOP_IMMEDIATELY`
+- `BUFFER_CONTINUOUSLY`
 
-APIM health must also pass before queued requests are pulled.
+## POC mock API
 
-## APIM transformation
+Set `APP_API_MODE=MOCK` to use the existing mock API response shape. In mock mode Project Pulse calls `RtaQueuedPath` with `?maxRecords=<RtaPageSize>` and accepts either a raw JSON array or an object containing an `Items` array.
 
-`ApimFieldMapping` is a JSON object where the property name is the APIM target field and the value is a dot-delimited RTA source path.
+For the current Project Pulse API POC:
 
-Example:
+- `APP_API_MODE=MOCK`
+- `RtaQueuedPath=/claims/pending`
+- `RtaHealthPath=/health`
+- `RtaDbHealthPath=/health`
 
-```json
-{
-  "correlationId": "CORRELATION_ID",
-  "patientIcn": "METADATA.PATIENT_ICN",
-  "program": "METADATA.PROGRAM"
-}
-```
+Set `LOG_POLL_PAYLOADS=true` only for fake/POC data. Disable it before processing real claim data.
 
-`ApimBatchRootProperty=claims` produces:
+## Service Bus retry envelope
 
-```json
-{
-  "claims": [ ... ]
-}
-```
+Fallback messages contain:
 
-Set it to an empty value later if APIM expects a raw JSON array.
+- `UniqueId` (RTA correlation ID, or mock `UniqueId`)
+- `RequestId`
+- `IdempotencyKey`
+- `Reason`
+- `QueuedAtUtc`
+- `OriginalPayload`
+- `TransformedPayload`
 
-## Status writeback
-
-`RtaStatusWritebackEnabled=false` by default because the final APIM response contract is not known yet.
-
-The configured future endpoint is:
-
-`PUT /requests/{correlationId}/status`
-
-When enabled, the provisional implementation expects APIM to return a JSON array containing one response object per correlation ID.
-
-## Retry behavior
-
-If the whole APIM batch receives a configured retry HTTP status, times out, or has a network failure, Project Pulse puts each `CORRELATION_ID` into Service Bus individually. Full claim payloads are not placed on the queue.
+Project Pulse does not consume these messages.

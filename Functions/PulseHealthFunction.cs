@@ -17,7 +17,9 @@ public sealed class PulseHealthFunction
     {
         var appApi = await CheckHttpAsync(
             Environment.GetEnvironmentVariable("AppApiBaseUrl"),
-            Environment.GetEnvironmentVariable("AppApiHealthPath") ?? "/health");
+            Environment.GetEnvironmentVariable("RtaHealthPath") ??
+            Environment.GetEnvironmentVariable("AppApiHealthPath") ??
+            "/health");
 
         var apim = await CheckHttpAsync(
             Environment.GetEnvironmentVariable("ApimBaseUrl"),
