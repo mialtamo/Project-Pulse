@@ -1,6 +1,8 @@
+using ProjectPulse.Processor.Models;
+
 namespace ProjectPulse.Processor.Services;
 
 public interface IRetryQueue
 {
-    Task EnqueueAsync(string uniqueId, string reason, CancellationToken cancellationToken);
+    Task EnqueueAsync(RetryEnvelope envelope, CancellationToken cancellationToken);
 }
