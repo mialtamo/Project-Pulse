@@ -3,6 +3,13 @@ using System.Text.Json;
 
 namespace ProjectPulse.Processor.Options;
 
+public enum ApimOutageMode
+{
+    BufferThenStop,
+    StopImmediately,
+    BufferContinuously
+}
+
 public sealed class ClaimProcessorOptions
 {
     [Required]
@@ -18,6 +25,8 @@ public sealed class ClaimProcessorOptions
     public int RtaPageSize { get; init; } = 100;
     public int RtaPagesPerPoll { get; init; } = 1;
     public bool RtaStatusWritebackEnabled { get; init; } = false;
+    public string AppApiMode { get; init; } = "RTA";
+    public bool LogPollPayloads { get; init; } = false;
 
     [Required]
     public string ApimBaseUrl { get; init; } = string.Empty;
@@ -26,6 +35,8 @@ public sealed class ClaimProcessorOptions
     public string ApimAdjudicationPath { get; init; } = "/claims/adjudicate";
     public int ApimRequestTimeoutSeconds { get; init; } = 15;
     public string ApimScope { get; init; } = string.Empty;
+    public string ApimOutageMode { get; init; } = "BUFFER_THEN_STOP";
+    public int ApimOutagePollStopSeconds { get; init; } = 300;
 
     public string CorrelationIdField { get; init; } = "CORRELATION_ID";
     public string ApimBatchRootProperty { get; init; } = "claims";
@@ -64,6 +75,41 @@ public sealed class ClaimProcessorOptions
 
     public int GetClampedPageSize() => Math.Clamp(RtaPageSize, 1, 100);
     public int GetClampedPagesPerPoll() => Math.Clamp(RtaPagesPerPoll, 1, 3);
+
+    public bool IsMockApiMode() =>
+        string.Equals(
+            Environment.GetEnvironmentVariable("APP_API_MODE") ?? AppApiMode,
+            "MOCK",
+            StringComparison.OrdinalIgnoreCase);
+
+    public bool ShouldLogPollPayloads() =>
+        bool.TryParse(
+            Environment.GetEnvironmentVariable("LOG_POLL_PAYLOADS"),
+            out var envValue)
+            ? envValue
+            : LogPollPayloads;
+
+    public int GetApimOutagePollStopSeconds() =>
+        int.TryParse(
+            Environment.GetEnvironmentVariable("APIM_OUTAGE_POLL_STOP_SECONDS"),
+            out var envValue)
+            ? Math.Max(1, envValue)
+            : Math.Max(1, ApimOutagePollStopSeconds);
+
+    public global::ProjectPulse.Processor.Options.ApimOutageMode GetApimOutageMode()
+    {
+        var value = (Environment.GetEnvironmentVariable("APIM_OUTAGE_MODE") ?? ApimOutageMode)
+            .Trim()
+            .Replace("-", "_", StringComparison.Ordinal)
+            .ToUpperInvariant();
+
+        return value switch
+        {
+            "STOP_IMMEDIATELY" => global::ProjectPulse.Processor.Options.ApimOutageMode.StopImmediately,
+            "BUFFER_CONTINUOUSLY" => global::ProjectPulse.Processor.Options.ApimOutageMode.BufferContinuously,
+            _ => global::ProjectPulse.Processor.Options.ApimOutageMode.BufferThenStop
+        };
+    }
 
     public Dictionary<string, string> GetApimFieldMapping()
     {
