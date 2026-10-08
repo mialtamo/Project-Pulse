@@ -1,268 +1,729 @@
 # Project Pulse
 
-**Project Pulse** is a .NET 10 isolated Azure Functions application for health-aware claim adjudication orchestration. It polls an internal App API, sends each returned claim independently through APIM to a third-party adjudication service, receives the adjudication response over the same HTTP request, and writes the result back through the internal App API.
+Project Pulse is a .NET 10 isolated Azure Functions application that polls an internal request API, transforms queued claim requests, sends them to APIM for adjudication, and buffers work to Azure Service Bus when APIM is unavailable.
 
+This README documents the behavior of the current `main` build.
 
-## Project naming
+## Current architecture
 
-- GitHub repository: `project-pulse`
-- .NET project: `ProjectPulse.Processor.csproj`
-- Root namespace: `ProjectPulse.Processor`
-- Primary Azure Function: `PollClaims`
-- Recommended Azure Function App: `func-pulse-processor-<env>`
-- Recommended retry Function App: `func-pulse-retry-<env>`
-- Recommended Service Bus queue: `pulse-claim-retry`
-
-## Processing model
-
-One API poll may return zero, one, or many records. Returned records are never treated as one business batch. Every record is handled as its own transaction:
-
-1. Timer fires according to `POLL_SCHEDULE`.
-2. Function probes the internal App API health endpoint.
-3. Function probes the APIM/backend health endpoint.
-4. If either dependency is unhealthy, the poll is skipped. The timer remains alive and checks again on the next schedule.
-5. Function calls the internal App API polling endpoint.
-6. Each returned record is processed independently with bounded parallelism.
-7. One record produces one APIM request and one third-party response.
-8. Successful adjudication JSON is written back through the internal App API.
-9. Configured HTTP/network/timeout failures enqueue only `{ "UniqueId": "..." }` to Service Bus.
-10. Service Bus messages have a 10-minute TTL by default.
-
-## Important behavior
-
-The timer trigger executes once per schedule across the Function App. Scaling the Flex Consumption plan does not cause multiple timer instances to poll the API at the same time. `MaxConcurrentRequests` controls independent 1:1 processing inside that invocation.
-
-If sustained throughput later requires horizontal distribution across many Function instances, the existing `UNIQUEID` queue can be promoted from retry-only to the normal dispatch mechanism without changing the App API or APIM contracts.
-
-## Poll frequency
-
-`POLL_SCHEDULE` is an Azure Functions NCRONTAB expression.
-
-Examples:
-
-- Every 60 seconds: `0 * * * * *`
-- Every 10 seconds: `*/10 * * * * *`
-- Every 5 seconds: `*/5 * * * * *`
-- Every second: `* * * * * *`
-
-Use the fastest interval only after load testing the internal API and downstream system.
-
-## App API response formats
-
-The poll endpoint can return any of these forms.
-
-Root array:
-
-```json
-[
-  { "UniqueId": "A100", "claim": {} },
-  { "UniqueId": "A101", "claim": {} }
-]
+```text
+RTA / App API
+    |
+    |  health + queued request polling
+    v
+Project Pulse
+    |
+    |-- APIM healthy -----------------------> APIM / adjudication backend
+    |
+    |-- APIM temporarily unavailable ------> Azure Service Bus
+    |
+    '-- RTA unhealthy / outage threshold ---> stop polling
 ```
 
-Wrapped collection using `AppApiRecordsField=records`:
+Project Pulse is currently a timer-triggered Azure Function. One timer invocation performs one health-check / poll / process cycle and then exits.
+
+The current POC schedule is:
+
+```text
+POLL_SCHEDULE=0 * * * * *
+```
+
+which runs once per minute.
+
+## Runtime and project
+
+- Runtime: Azure Functions isolated worker
+- Framework: .NET 10
+- Primary project: `ProjectPulse.Processor.csproj`
+- Primary timer Function: `PollClaims`
+- Health Function: `PulseHealth`
+- Landing page Function: `PulseLandingPage`
+- Retry transport: Azure Service Bus
+- Authentication: Managed Identity / `DefaultAzureCredential`
+- Telemetry: Application Insights
+
+## Polling behavior
+
+Each `PollClaims` invocation performs the following sequence:
+
+1. Check RTA API health.
+2. Check RTA DB/App health.
+3. Check APIM/backend health.
+4. If RTA is unhealthy, stop immediately and do not poll for claims.
+5. Evaluate the current APIM outage state.
+6. Depending on the configured outage mode:
+   - send normally to APIM,
+   - continue polling temporarily and buffer to Service Bus, or
+   - stop polling.
+7. Poll the RTA/App API for queued requests.
+8. Transform the returned records into the APIM contract.
+9. Submit the transformed records as one APIM batch, or buffer each record to Service Bus.
+10. Emit telemetry and finish the invocation.
+
+The Function does not stay open between timer executions.
+
+## RTA mode
+
+When:
+
+```text
+APP_API_MODE=RTA
+```
+
+Project Pulse calls:
+
+```text
+GET {RtaQueuedPath}?page=1&limit={RtaPageSize}
+```
+
+and continues paging up to `RtaPagesPerPoll`.
+
+Current limits enforced by code:
+
+- `RtaPageSize`: 1-100
+- `RtaPagesPerPoll`: 1-3
+
+The RTA response is expected to contain:
 
 ```json
 {
-  "records": [
-    { "UniqueId": "A100", "claim": {} },
-    { "UniqueId": "A101", "claim": {} }
+  "Items": [
+    {
+      "REQUEST_ID": 3348,
+      "CORRELATION_ID": "7d3f6d8a-3d04-4f4c-b1ca-5880c79e8d6d",
+      "IDEMPOTENCY_KEY": "50c7f236-67bd-4a9e-8d2d-2fb65d7d1d3d",
+      "REQUEST_TYPE": "INITIAL_REQUEST",
+      "METADATA": {}
+    }
+  ],
+  "HasNextPage": true
+}
+```
+
+Polling stops early when `HasNextPage=false`.
+
+## Mock API mode
+
+When:
+
+```text
+APP_API_MODE=MOCK
+```
+
+Project Pulse calls:
+
+```text
+GET {RtaQueuedPath}?maxRecords={RtaPageSize}
+```
+
+The mock response can be either a raw JSON array or an object containing an `Items` array.
+
+Current POC values:
+
+```text
+APP_API_MODE=MOCK
+RtaQueuedPath=/claims/pending
+RtaHealthPath=/health
+RtaDbHealthPath=/health
+CorrelationIdField=uniqueId
+```
+
+Mock correlation IDs can also be resolved from either `uniqueId` or `UniqueId`.
+
+## Health behavior
+
+### RTA health
+
+Both configured RTA health endpoints are checked:
+
+```text
+RtaHealthPath
+RtaDbHealthPath
+```
+
+A healthy RTA response must:
+
+- return an HTTP success status, and
+- contain:
+
+```json
+{
+  "IS_HEALTHY": true
+}
+```
+
+If either RTA health check fails, Project Pulse does not request new claims.
+
+### APIM health
+
+Project Pulse sends a GET request to:
+
+```text
+{ApimBaseUrl}{ApimHealthPath}
+```
+
+Any successful HTTP status is considered healthy.
+
+## APIM outage handling
+
+The supported outage modes are:
+
+```text
+BUFFER_THEN_STOP
+STOP_IMMEDIATELY
+BUFFER_CONTINUOUSLY
+```
+
+The recommended mode is:
+
+```text
+APIM_OUTAGE_MODE=BUFFER_THEN_STOP
+APIM_OUTAGE_POLL_STOP_SECONDS=300
+```
+
+With this mode:
+
+```text
+APIM healthy
+  -> poll RTA
+  -> transform
+  -> send batch to APIM
+
+APIM unavailable for less than 300 seconds
+  -> continue polling RTA
+  -> transform
+  -> buffer each record to Service Bus
+
+APIM unavailable for 300 seconds or longer
+  -> stop polling RTA
+
+APIM recovers
+  -> clear outage state
+  -> resume normal polling
+
+APIM unavailable + Service Bus send fails
+  -> stop polling immediately
+```
+
+The APIM outage timer is currently stored in memory. A Function host recycle, restart, or new process instance resets that timer. This is acceptable for the current POC but should be externalized if the outage timer must survive process restarts in production.
+
+## APIM payload transformation
+
+Field mapping is configuration driven through `ApimFieldMapping`.
+
+Example:
+
+```json
+{
+  "correlationId": "CORRELATION_ID",
+  "requestId": "REQUEST_ID",
+  "idempotencyKey": "IDEMPOTENCY_KEY",
+  "requestType": "REQUEST_TYPE",
+  "patientIcn": "METADATA.PATIENT_ICN",
+  "sponsorIcn": "METADATA.SPONSOR_ICN",
+  "startDateOfService": "METADATA.START_DATE_OF_SERVICE",
+  "endDateOfService": "METADATA.END_DATE_OF_SERVICE",
+  "program": "METADATA.PROGRAM",
+  "includeAdjustmentDetails": "METADATA.INCLUDE_ADJUSTMENT_DETAILS"
+}
+```
+
+Dot-delimited source paths are supported.
+
+With:
+
+```text
+ApimBatchRootProperty=claims
+```
+
+the outbound payload is:
+
+```json
+{
+  "claims": [
+    {
+      "correlationId": "...",
+      "patientIcn": "...",
+      "program": "..."
+    }
   ]
 }
 ```
 
-Single record:
+If `ApimBatchRootProperty` is empty, Project Pulse sends a raw JSON array.
 
-```json
-{ "UniqueId": "A100", "claim": {} }
+## APIM request behavior
+
+The transformed records from a poll are sent in one POST request to:
+
+```text
+{ApimBaseUrl}{ApimAdjudicationPath}
 ```
 
-Every record is processed separately.
+The request includes:
 
-## Required Azure application settings
+```text
+X-Correlation-ID: <generated batch ID>
+Idempotency-Key: <generated batch ID>
+X-Pulse-Record-Count: <number of records>
+```
 
-| Setting | Example | Purpose |
-| --- | --- | --- |
-| `POLL_SCHEDULE` | `0 * * * * *` | Poll cadence |
-| `AppApiBaseUrl` | `https://internal-api.contoso.local` | Internal App API FQDN |
-| `AppApiHealthPath` | `/health` | Must represent App API and SQL/SP health |
-| `AppApiPendingClaimsPath` | `/claims/pending` | Endpoint that invokes the stored procedure |
-| `AppApiResultPathTemplate` | `/claims/{uniqueId}/result` | Writes adjudication result back |
-| `AppApiPollMethod` | `POST` | GET/POST/etc. for polling endpoint |
-| `AppApiRecordsField` | `records` | Optional JSON collection wrapper |
-| `AppApiScope` | `api://.../.default` | Entra audience/scope for Managed Identity |
-| `ApimBaseUrl` | `https://claims-api.contoso.local` | APIM FQDN |
-| `ApimHealthPath` | `/health` | APIM/backend health operation |
-| `ApimAdjudicationPath` | `/claims/adjudicate` | Claim submission operation |
-| `ApimScope` | `api://.../.default` | Entra audience/scope for APIM |
-| `ApimRequestTimeoutSeconds` | `15` | Max same-connection adjudication wait |
-| `UniqueIdField` | `UniqueId` | JSON property used as unique claim ID |
-| `MaxConcurrentRequests` | `50` | Maximum concurrent 1:1 adjudications |
-| `RetryHttpStatusCodes` | `404,408,429,500,502,503,504` | Transport/HTTP retry classification |
-| `JsonResponseCodeField` | `ResponseCode` | Field inspected in successful JSON responses |
-| `JsonRetryCodes` | `420,421` | JSON codes that enqueue the ID |
-| `JsonAlertCodes` | `419` | JSON codes logged as business alerts |
-| `ServiceBusFullyQualifiedNamespace` | `name.servicebus.windows.net` | Service Bus namespace FQDN |
-| `ServiceBusQueueName` | `pulse-claim-retry` | Retry queue |
-| `ServiceBusMessageTtlMinutes` | `10` | Per-message TTL |
-| `CircuitFailureThreshold` | `5` | Consecutive outbound failures before opening circuit |
-| `CircuitOpenSeconds` | `30` | Local circuit-open duration |
+The current idempotency header is batch-level, not per-claim.
 
-## Security configuration
+The APIM request is cancelled after:
 
-Recommended Azure configuration:
+```text
+ApimRequestTimeoutSeconds
+```
 
-- Function App: Flex Consumption, Linux, .NET 10 isolated.
-- Enable system-assigned Managed Identity.
-- VNet-integrate the Function App outbound path.
-- Internal App API should be private/restricted and reachable only through approved networking.
-- APIM should use private connectivity where architecture permits.
-- Service Bus should have public network access disabled and a Private Endpoint.
-- Grant Function Managed Identity `Azure Service Bus Data Sender` on the retry queue/namespace.
-- Protect App API and APIM with Microsoft Entra ID and grant the Function Managed Identity only the required application role/scope.
-- Do not store SQL credentials in this Function. SQL remains behind the internal App API.
-- Do not log claim payloads. The code logs the configured UniqueID and operational metadata only.
-- Use an `Idempotency-Key`/correlation header based on UniqueID on the APIM request. The downstream system should honor idempotency if it supports it.
+## Retry and failure classification
 
-## Health contract
+### Retryable HTTP responses
 
-The internal App API `/health` endpoint should return non-2xx, preferably HTTP 503, when the API cannot safely execute the claim stored procedure. It should validate the underlying SQL dependency rather than only reporting that the web process is running.
+The default retryable status codes are:
 
-The APIM `/health` operation should represent whether the path to the adjudication backend is usable. It must be lightweight and must not submit a real claim.
+```text
+404,408,429,500,502,503,504
+```
 
-When either health probe fails, no new claims are requested from the App API. The timer continues running so the service automatically resumes after health recovers.
+When APIM returns one of those statuses, each claim in the submitted batch is buffered individually to Service Bus.
 
-## Retry behavior
+### Network failures and timeouts
 
-The retry queue contains only:
+APIM network failures and request timeouts also buffer each claim individually to Service Bus.
+
+### Non-retry HTTP responses
+
+A non-success status that is not listed in `RetryHttpStatusCodes` is classified as `Alerted` and is not automatically queued.
+
+### JSON business codes
+
+For successful HTTP responses, Project Pulse can inspect a configured response property:
+
+```text
+JsonResponseCodeField=ResponseCode
+```
+
+Codes in `JsonRetryCodes` are buffered to Service Bus.
+
+Codes in `JsonAlertCodes` are reported as business alerts.
+
+Current POC alert configuration:
+
+```text
+JsonAlertCodes=419
+```
+
+## Circuit breaker
+
+Project Pulse contains an in-process outbound circuit breaker.
+
+Defaults:
+
+```text
+CircuitFailureThreshold=5
+CircuitOpenSeconds=30
+```
+
+After the configured number of consecutive APIM failures, the circuit opens. While open, records are sent to the Service Bus retry path instead of attempting APIM.
+
+After the open period expires, another APIM attempt is allowed.
+
+The circuit breaker state is also process-local and resets on Function host recycle or restart.
+
+## Service Bus buffering
+
+Project Pulse is write-only to Service Bus. It does not consume, replay, or drain buffered messages.
+
+A separate retry/recovery application is expected to consume the queue in the future.
+
+Each buffered claim is written as a `RetryEnvelope`:
 
 ```json
 {
-  "UniqueId": "A100"
+  "UniqueId": "001",
+  "RequestId": null,
+  "IdempotencyKey": null,
+  "Reason": "ApimUnavailableBufferThenStop",
+  "QueuedAtUtc": "2026-10-08T00:46:02Z",
+  "OriginalPayload": "{...}",
+  "TransformedPayload": "{...}"
 }
 ```
 
-The message also includes `reason` as a Service Bus application property for operations telemetry. Claim JSON is not placed on Service Bus.
+Service Bus message settings:
 
-This project intentionally does not automatically resubmit a claim if the third-party adjudication succeeded but the result writeback to the internal App API failed. Automatically repeating the adjudication could create a duplicate business transaction. The code retries only the writeback call and then emits `ClaimResultWritebackFailed` telemetry for alerting.
+- `MessageId` = claim unique/correlation ID
+- `CorrelationId` = claim unique/correlation ID
+- `Subject` = `ClaimRetry`
+- TTL = `ServiceBusMessageTtlMinutes`
+- application property `reason`
+- application property `requestId` when available
+- application property `idempotencyKey` when available
 
-`ProjectPulse.Retry` should later consume `pulse-claim-retry`, wait for dependencies to be healthy, retrieve the current claim by UniqueID from the internal App API, and resubmit through APIM.
+Because the current POC queue does not rely on duplicate detection, repeated polling of the same source record can create multiple Service Bus messages with the same `MessageId`.
 
-## Service Bus queue configuration
+## Important data-security note
 
-Set queue `DefaultMessageTimeToLive` to 10 minutes as a server-side guardrail even though each message also receives a 10-minute TTL in code.
+The current Service Bus envelope contains both the original and transformed claim payload.
 
-Recommended queue settings:
+That is intentional for the current POC, but it means the queue can contain claim data rather than only an identifier.
 
-- Default TTL: 10 minutes
-- Dead-lettering on message expiration: Enabled
-- Duplicate detection: Consider enabling with a window appropriate to the POC, because `MessageId` is the UniqueID
+Production deployment should therefore treat Service Bus as a sensitive data store and apply the same security controls used for other claim-processing components.
 
-This means expired retry records stop normal processing after 10 minutes but remain visible in the DLQ for alerting/audit rather than disappearing silently.
+## RTA status writeback
 
-## Azure Monitor / Application Insights signals
-
-The code emits events/metrics suitable for Azure Monitor alerts:
-
-- `DependencyHealth.AppApi`
-- `DependencyHealth.ApimAndBackend`
-- `DependencyHealth` event
-- `ClaimPollSkippedDependencyUnhealthy`
-- `ClaimsReturnedFromAppApi`
-- `ClaimQueuedForRetry`
-- `ClaimBusinessAlert`
-- `ClaimNonRetryHttpFailure`
-- `ClaimResultWritebackFailed`
-- `ClaimPollCompleted`
-
-Recommended alerts:
-
-1. App API health metric equals 0 for 3 consecutive polls.
-2. APIM/backend health metric equals 0 for 3 consecutive polls.
-3. `ClaimResultWritebackFailed` > 0.
-4. Retry queue active message count above expected threshold.
-5. Retry queue DLQ message count > 0.
-6. P95/P99 adjudication duration over the agreed SLA.
-7. Retry percentage above an agreed threshold.
-
-## Current assumptions
-
-- App API owns SQL/SP access and duplicate prevention.
-- Each returned claim is a unique record.
-- Third-party response is returned on the same HTTP connection.
-- One claim equals one APIM request and one response.
-- The exact API paths and JSON schema are placeholders and are intentionally configuration driven.
-
-## Landing page
-
-Project Pulse includes a branded HTTP landing page at the Function App root URL:
+Status writeback is controlled by:
 
 ```text
-https://<function-app-name>.azurewebsites.net/
+RtaStatusWritebackEnabled
 ```
 
-The page uses the Project Pulse logo embedded in the application assembly, so it does not depend on external image hosting. The logo is exposed internally by the app at `/pulse-logo`.
+The current default is:
 
-The bottom-left version label is controlled entirely by application settings:
-
-| Setting | Example | Purpose |
-| --- | --- | --- |
-| `PROJECT_PULSE_VERSION` | `0.1.0` | Version displayed on the landing page |
-| `PROJECT_PULSE_ENVIRONMENT` | `POC` | Environment displayed beside the version |
-
-The values are read at request time, so changing them in the Function App environment settings updates the landing page without changing the source code. The landing page is intentionally informational only and does not expose dependency health, claim data, queue state, or other operational details.
-
-Because `host.json` sets the HTTP `routePrefix` to an empty string, HTTP-triggered Functions are exposed without the default `/api` prefix. The timer-triggered claim processor is unaffected.
-
-## Configuration examples
-
-The repository includes two safe configuration templates that can be committed to GitHub:
-
-- `environment.example.json` is the human-readable reference grouped by feature area. It documents every environment variable currently used by Project Pulse without containing real credentials or production endpoints.
-- `local.settings.example.json` uses the Azure Functions local settings format. Developers can copy this file to `local.settings.json` for local development.
-
-Create a local settings file with:
-
-```powershell
-Copy-Item local.settings.example.json local.settings.json
+```text
+false
 ```
 
-`local.settings.json` is intentionally ignored by Git and must not be committed. Azure Function App settings are configured in Azure as application settings. The example files are documentation/templates only and do not automatically configure the deployed Function App.
+When enabled, the current provisional implementation expects APIM to return a JSON array containing correlation IDs. Each response item is sent to:
 
-### Environment variable reference
+```text
+PUT {RtaStatusPathTemplate}
+```
 
-| Setting | Required | Default / Example | Purpose |
+with `{correlationId}` replaced by the returned correlation ID.
+
+Writeback retries are controlled by:
+
+```text
+ResultWriteMaxAttempts
+ResultWriteRetryDelayMilliseconds
+```
+
+This portion of the implementation should be revisited when the final APIM response contract is confirmed.
+
+## Managed Identity and authentication
+
+Project Pulse uses `DefaultAzureCredential`.
+
+For Service Bus, the Function App managed identity should have:
+
+```text
+Azure Service Bus Data Sender
+```
+
+at the queue or namespace scope.
+
+For the RTA/App API and APIM, bearer tokens are requested only when the corresponding scope is configured:
+
+```text
+AppApiScope
+ApimScope
+```
+
+If a scope is empty, no Authorization header is added.
+
+No Service Bus connection string is required by Project Pulse.
+
+## HTTP endpoints
+
+### Landing page
+
+```text
+GET /
+GET /pulse
+```
+
+The landing page displays the Project Pulse branding plus the configured version and environment.
+
+The logo is served from:
+
+```text
+GET /pulse-logo
+```
+
+The landing page includes defensive headers such as:
+
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- Content Security Policy
+- no-cache headers
+
+### Health endpoint
+
+```text
+GET /pulse-health
+```
+
+The endpoint currently uses anonymous authorization and returns:
+
+```json
+{
+  "appApi": true,
+  "apim": false,
+  "serviceBus": true,
+  "checkedAt": "..."
+}
+```
+
+Important: the Service Bus portion of `/pulse-health` currently validates TCP connectivity to port 5671 only. It does not prove that Managed Identity authorization or queue send permissions are working.
+
+The endpoint itself always returns HTTP 200 and communicates dependency state through the JSON booleans.
+
+## Logging and telemetry
+
+Application Insights is enabled for the isolated worker.
+
+Key events and metrics currently emitted include:
+
+- `DependencyHealth`
+- `DependencyHealth.<dependency>`
+- `ClaimPollSkippedRtaUnhealthy`
+- `ApimRecovered`
+- `ClaimPollSuspendedForApimOutage`
+- `RtaQueuedRecordsReturned`
+- `AppApiMockPollFailed`
+- `RtaQueuedPollFailed`
+- `ClaimBatchBufferedToServiceBus`
+- `ClaimQueuedForRetry`
+- `ClaimBatchBusinessAlert`
+- `RtaStatusWritebackSkipped`
+- `RtaStatusWritebackFailed`
+- `ClaimPollCompleted`
+- `ClaimBatchSize`
+
+### Payload logging
+
+The setting:
+
+```text
+LOG_POLL_PAYLOADS=true
+```
+
+logs mock/RTA poll payloads and APIM outbound batch payloads.
+
+This is intended only for fake POC data.
+
+For real claim data use:
+
+```text
+LOG_POLL_PAYLOADS=false
+```
+
+to avoid placing claim payloads in application logs.
+
+## Configuration reference
+
+### Core / runtime
+
+| Setting | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `PROJECT_PULSE_VERSION` | No | `0.1.0` | Version shown on the Project Pulse landing page |
-| `PROJECT_PULSE_ENVIRONMENT` | No | `POC` | Environment label shown on the landing page |
-| `AzureWebJobsStorage` | Yes for Functions runtime | `UseDevelopmentStorage=true` locally | Azure Functions runtime storage |
-| `FUNCTIONS_WORKER_RUNTIME` | Yes | `dotnet-isolated` | .NET isolated worker selection |
-| `POLL_SCHEDULE` | Yes | `0 * * * * *` | NCRONTAB schedule for the polling Function |
-| `MaxConcurrentRequests` | No | `50` | Maximum number of independent claims processed concurrently per poll invocation |
-| `AppApiBaseUrl` | **Yes** | `https://internal-api.example.com` | Base URL of the internal application API |
-| `AppApiHealthPath` | No | `/health` | Internal API dependency-health endpoint |
-| `AppApiPendingClaimsPath` | No | `/claims/pending` | Endpoint used to retrieve pending claims |
-| `AppApiResultPathTemplate` | No | `/claims/{uniqueId}/result` | Endpoint used to write adjudication results back |
-| `AppApiPollMethod` | No | `POST` | HTTP method used for the polling request |
-| `AppApiRecordsField` | No | `records` | Optional property containing returned claim records |
-| `AppApiTimeoutSeconds` | No | `10` | Timeout for internal App API calls |
-| `AppApiScope` | Depends on auth | `api://.../.default` | Entra scope requested by the Function managed identity |
-| `ApimBaseUrl` | **Yes** | `https://claims-api.example.com` | APIM base URL |
-| `ApimHealthPath` | No | `/health` | APIM / downstream health operation |
-| `ApimAdjudicationPath` | No | `/claims/adjudicate` | APIM operation used for claim adjudication |
-| `ApimRequestTimeoutSeconds` | No | `15` | Maximum time to wait for the same-connection adjudication response |
-| `ApimScope` | Depends on auth | `api://.../.default` | Entra scope requested for APIM |
-| `UniqueIdField` | No | `UniqueId` | JSON field containing the claim identifier |
-| `RetryHttpStatusCodes` | No | `404,408,429,500,502,503,504` | HTTP responses that place the UniqueID on the retry queue |
-| `JsonResponseCodeField` | No | `ResponseCode` | JSON property inspected for business response codes |
-| `JsonRetryCodes` | No | empty | Business response codes that should queue the UniqueID for retry |
-| `JsonAlertCodes` | No | `419` | Business response codes that should emit alert telemetry |
-| `ServiceBusFullyQualifiedNamespace` | **Yes** | `sb-pulse-dev.servicebus.windows.net` | Service Bus namespace used by the retry publisher |
-| `ServiceBusQueueName` | No | `pulse-claim-retry` | Retry queue name |
-| `ServiceBusMessageTtlMinutes` | No | `10` | Time-to-live assigned to retry messages |
-| `CircuitFailureThreshold` | No | `5` | Consecutive outbound failures required to open the local circuit breaker |
-| `CircuitOpenSeconds` | No | `30` | Time the circuit remains open before allowing another attempt |
-| `ResultWriteMaxAttempts` | No | `3` | Maximum attempts to write a completed adjudication result back to the internal API |
-| `ResultWriteRetryDelayMilliseconds` | No | `500` | Delay between result-write retry attempts |
+| `AzureWebJobsStorage` | Azure Functions runtime | none | Functions host storage |
+| `FUNCTIONS_WORKER_RUNTIME` | Runtime | `dotnet-isolated` | Isolated worker |
+| `POLL_SCHEDULE` | Yes | none | Timer NCRONTAB expression |
+| `PROJECT_PULSE_VERSION` | No | `0.0.0` on page | Landing-page version |
+| `PROJECT_PULSE_ENVIRONMENT` | No | `UNKNOWN` on page | Landing-page environment |
 
-Values such as client secrets, passwords, SQL connection strings, or third-party credentials should not be added to either example file. Project Pulse is designed to use Managed Identity for Azure dependencies. Any unavoidable secret should be stored in Azure Key Vault and referenced from Function App configuration rather than committed to the repository.
+### RTA / App API
+
+| Setting | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `AppApiBaseUrl` | Yes | none | Base URL |
+| `AppApiScope` | No | empty | Managed Identity token scope |
+| `AppApiTimeoutSeconds` | No | `10` | HTTP timeout |
+| `APP_API_MODE` | No | `RTA` | `RTA` or `MOCK` |
+| `RtaQueuedPath` | No | `/requests/queued` | Queue polling endpoint |
+| `RtaHealthPath` | No | `/healthchecks` | API health endpoint |
+| `RtaDbHealthPath` | No | `/healthchecks/db/app` | DB/App health endpoint |
+| `RtaStatusPathTemplate` | No | `/requests/{correlationId}/status` | Status writeback endpoint |
+| `RtaPageSize` | No | `100` | Records per page |
+| `RtaPagesPerPoll` | No | `1` | Maximum pages per poll |
+| `RtaStatusWritebackEnabled` | No | `false` | Enable status writeback |
+| `CorrelationIdField` | No | `CORRELATION_ID` | Correlation field |
+| `LOG_POLL_PAYLOADS` | No | `false` | Log request payloads |
+
+### APIM
+
+| Setting | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `ApimBaseUrl` | Yes | none | APIM base URL |
+| `ApimHealthPath` | No | `/health` | Health endpoint |
+| `ApimAdjudicationPath` | No | `/claims/adjudicate` | Adjudication operation |
+| `ApimRequestTimeoutSeconds` | No | `15` | APIM request timeout |
+| `ApimScope` | No | empty | Managed Identity token scope |
+| `ApimBatchRootProperty` | No | `claims` | Batch wrapper property |
+| `ApimFieldMapping` | No | built-in mapping | RTA-to-APIM field map |
+| `APIM_OUTAGE_MODE` | No | `BUFFER_THEN_STOP` | Outage behavior |
+| `APIM_OUTAGE_POLL_STOP_SECONDS` | No | `300` | Stop-polling threshold |
+
+### Retry / response handling
+
+| Setting | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `RetryHttpStatusCodes` | No | `404,408,429,500,502,503,504` | HTTP codes that buffer |
+| `JsonResponseCodeField` | No | `ResponseCode` | Response code property |
+| `JsonRetryCodes` | No | empty | Business codes that buffer |
+| `JsonAlertCodes` | No | `419` | Business codes that alert |
+| `ResultWriteMaxAttempts` | No | `3` | Writeback attempts |
+| `ResultWriteRetryDelayMilliseconds` | No | `500` | Writeback retry delay |
+
+### Service Bus
+
+| Setting | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `ServiceBusFullyQualifiedNamespace` | Yes | none | Namespace FQDN |
+| `ServiceBusQueueName` | No | `claim-retry` | Retry queue |
+| `ServiceBusMessageTtlMinutes` | No | `10` | Message TTL |
+
+### Circuit breaker
+
+| Setting | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `CircuitFailureThreshold` | No | `5` | Failures before circuit opens |
+| `CircuitOpenSeconds` | No | `30` | Circuit-open duration |
+
+## Current POC application settings
+
+The current mock/API POC should include values equivalent to:
+
+```text
+APP_API_MODE=MOCK
+LOG_POLL_PAYLOADS=true
+
+RtaQueuedPath=/claims/pending
+RtaHealthPath=/health
+RtaDbHealthPath=/health
+RtaPageSize=100
+RtaPagesPerPoll=1
+CorrelationIdField=uniqueId
+
+APIM_OUTAGE_MODE=BUFFER_THEN_STOP
+APIM_OUTAGE_POLL_STOP_SECONDS=300
+
+ServiceBusQueueName=projectpulsequeue
+ServiceBusMessageTtlMinutes=10
+```
+
+For real claim data, `LOG_POLL_PAYLOADS` should be changed to `false`.
+
+## Legacy / currently unused settings
+
+Some older POC settings may still exist in the Azure Function App configuration but are not consumed by the current code.
+
+Examples include:
+
+```text
+MAX_CONCURRENT_REQUESTS
+CircuitHalfOpenRequests
+HealthCheckIntervalSeconds
+HealthFailureThreshold
+HealthRecoveryThreshold
+```
+
+They can be removed after confirming no external automation depends on them.
+
+## Deployment
+
+The GitHub Actions workflow:
+
+```text
+.github/workflows/main_projectpulse.yml
+```
+
+runs on pushes to `main` and can also be started manually.
+
+Current deployment flow:
+
+1. Checkout the repository.
+2. Install .NET 10.
+3. Run a Release build into `./output`.
+4. Authenticate to Azure using GitHub OIDC.
+5. Deploy the build output using `Azure/functions-action`.
+
+No Azure client secret is stored in the workflow. Azure login uses GitHub federated identity credentials plus repository secrets containing the client, tenant, and subscription IDs.
+
+## Security posture
+
+Current design strengths:
+
+- Managed Identity for Azure Service Bus.
+- Optional Managed Identity bearer authentication for RTA/App API and APIM.
+- No SQL credentials in Project Pulse.
+- No Service Bus connection string in application code.
+- Configuration kept outside source code.
+- GitHub deployment uses OIDC rather than an Azure client secret.
+- Landing page includes defensive browser headers.
+
+Recommended production posture:
+
+- VNet integration for the Function App.
+- Private Endpoint for Service Bus.
+- Private/restricted RTA/App API connectivity.
+- Private/restricted APIM connectivity where supported by the target architecture.
+- Disable public access where operationally practical.
+- Grant only `Azure Service Bus Data Sender` to Project Pulse.
+- Keep `LOG_POLL_PAYLOADS=false`.
+- Treat Service Bus as sensitive because the current retry envelope contains claim payloads.
+- Protect or network-restrict `/pulse-health`.
+- Store any unavoidable secrets in Azure Key Vault and reference them from Function App configuration.
+- Consider durable APIM outage state if the 5-minute threshold must survive host restarts.
+- Consider duplicate detection / end-to-end idempotency before production replay logic is introduced.
+
+## Repository layout
+
+```text
+Functions/
+  LandingPageFunction.cs
+  PollClaimsFunction.cs
+  PulseHealthFunction.cs
+
+Models/
+  ClaimProcessingResult.cs
+  HealthResult.cs
+  RetryEnvelope.cs
+
+Options/
+  ClaimProcessorOptions.cs
+
+Services/
+  ApimOutageTracker.cs
+  AppApiClient.cs
+  ClaimProcessor.cs
+  HealthGate.cs
+  ManagedIdentityAuthHeaderProvider.cs
+  OutboundCircuitBreaker.cs
+  PayloadTransformer.cs
+  ServiceBusRetryQueue.cs
+  interfaces...
+
+Assets/
+  project-pulse-logo.png
+
+Program.cs
+host.json
+environment.example.json
+local.settings.example.json
+RTA-BATCH-UPDATE.md
+```
+
+## Current production-readiness limitations
+
+The current build is appropriate for the POC, but the following should be addressed before production:
+
+1. APIM outage and circuit-breaker state are in-memory only.
+2. Service Bus retry messages currently contain complete payloads.
+3. Duplicate queue messages are possible if RTA exposes the same record repeatedly.
+4. `/pulse-health` is anonymous.
+5. The Service Bus health endpoint checks network connectivity, not sender authorization.
+6. RTA status writeback is provisional until the final APIM response contract is confirmed.
+7. Automated unit/integration tests have not yet been added to the repository.
+
+## Related project
+
+The POC mock API is maintained separately in:
+
+```text
+mialtamo/ProjectPulse-API
+```
+
+For the current POC, Project Pulse uses that API as its RTA/App API source while the real RTA integration contract is being finalized.
