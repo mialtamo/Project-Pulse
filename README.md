@@ -4,6 +4,17 @@ Project Pulse is a .NET 10 isolated Azure Functions application that polls an in
 
 This README documents the behavior of the current `main` build.
 
+## Development documentation
+
+Milestone-driven development is documented under `/docs`:
+
+- `docs/PRODUCT-SPEC.md` - product goals, current POC behavior, and boundaries.
+- `docs/ARCHITECTURE.md` - current runtime and component architecture.
+- `docs/SECURITY.md` - current security model and production hardening requirements.
+- `docs/MILESTONES.md` - M0 through M10 roadmap and acceptance criteria.
+- `docs/CURRENT-STATE.md` - source of truth for what is implemented today.
+- `docs/DEVELOPMENT-PROMPT.md` - reusable one-milestone-at-a-time development prompt.
+
 ## Current architecture
 
 ```text
