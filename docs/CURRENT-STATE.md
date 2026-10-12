@@ -214,6 +214,45 @@ App API/APIM token access depends on configured Entra scopes.
 - Recovery processor does not exist yet.
 - High-throughput production architecture has not been load-tested.
 
+## Request history dashboard
+
+A POC request-history dashboard is now implemented:
+
+- `GET /requests.html` renders recent processing activity.
+- `GET /requests` returns recent request-history metadata.
+- `GET /requests/{id}` returns one history record and, when enabled, payload details.
+
+Metadata is stored in Azure Table Storage. APIM request/response payload bodies are stored in Azure Blob Storage to avoid Table Storage property-size limits.
+
+By default the implementation reuses `AzureWebJobsStorage`. An optional `RequestHistoryStorageConnectionString` can point request history at a separate storage account.
+
+Optional names:
+
+```text
+RequestHistoryTableName=ProjectPulseRequestHistory
+RequestHistoryBlobContainerName=projectpulse-history-payloads
+```
+
+When:
+
+```text
+LOG_POLL_PAYLOADS=true
+```
+
+the exact APIM batch JSON sent and the exact APIM response body received are persisted and displayed.
+
+When:
+
+```text
+LOG_POLL_PAYLOADS=false
+```
+
+payload bodies are neither persisted nor returned by the request-history API. Metadata such as unique ID, timestamps, destination, status, HTTP status, business code, and Service Bus reason remains available.
+
+Service Bus-buffered work is displayed as `Destination=ServiceBus` with the buffering timestamp and reason.
+
+The request-history persistence is intentionally best-effort. A history-storage failure is logged but does not stop claim processing.
+
 ## Next milestone
 
 M1 - APIM Mock Adjudication.

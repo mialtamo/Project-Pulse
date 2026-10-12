@@ -15,6 +15,7 @@ public sealed class ClaimProcessor(
     IAuthHeaderProvider authHeaderProvider,
     IAppApiClient appApiClient,
     IRetryQueue retryQueue,
+    IRequestHistoryStore requestHistoryStore,
     PayloadTransformer transformer,
     OutboundCircuitBreaker circuitBreaker,
     ApimOutageTracker outageTracker,
@@ -38,6 +39,8 @@ public sealed class ClaimProcessor(
         }
 
         var transformed = TransformClaims(claims);
+        var ids = claims.Select(GetCorrelationId).ToArray();
+        var batchId = Guid.NewGuid().ToString("N");
 
         try
         {
@@ -49,7 +52,15 @@ public sealed class ClaimProcessor(
             throw;
         }
 
-        var ids = claims.Select(GetCorrelationId).ToArray();
+        await TryRecordHistoryAsync(
+            () => requestHistoryStore.RecordServiceBusAsync(
+                batchId,
+                ids,
+                reason,
+                DateTimeOffset.UtcNow,
+                cancellationToken),
+            "service bus buffer");
+
         telemetry.TrackEvent("ClaimBatchBufferedToServiceBus", new Dictionary<string, string>
         {
             ["recordCount"] = claims.Count.ToString(),
@@ -94,6 +105,15 @@ public sealed class ClaimProcessor(
                 throw;
             }
 
+            await TryRecordHistoryAsync(
+                () => requestHistoryStore.RecordServiceBusAsync(
+                    batchId,
+                    correlationIds,
+                    "OutboundCircuitOpen",
+                    DateTimeOffset.UtcNow,
+                    cancellationToken),
+                "circuit-open service bus buffer");
+
             CompleteTelemetry(operation.Telemetry, false, "CircuitOpen", stopwatch.ElapsedMilliseconds);
             return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "OutboundCircuitOpen");
         }
@@ -108,18 +128,29 @@ public sealed class ClaimProcessor(
             ? transformedArray
             : new JsonObject { [_options.ApimBatchRootProperty] = transformedArray };
 
+        var outboundPayloadJson = outboundPayload.ToJsonString();
+
+        await TryRecordHistoryAsync(
+            () => requestHistoryStore.RecordApimAttemptAsync(
+                batchId,
+                correlationIds,
+                outboundPayloadJson,
+                DateTimeOffset.UtcNow,
+                cancellationToken),
+            "APIM request");
+
         if (_options.ShouldLogPollPayloads())
         {
             logger.LogInformation(
                 "APIM outbound batch {BatchId} payload: {Payload}",
                 batchId,
-                outboundPayload.ToJsonString());
+                outboundPayloadJson);
         }
 
         var client = httpClientFactory.CreateClient("Apim");
         using var request = new HttpRequestMessage(HttpMethod.Post, _options.ApimAdjudicationPath)
         {
-            Content = new StringContent(outboundPayload.ToJsonString(), Encoding.UTF8, "application/json")
+            Content = new StringContent(outboundPayloadJson, Encoding.UTF8, "application/json")
         };
 
         request.Headers.TryAddWithoutValidation("X-Correlation-ID", batchId);
@@ -135,6 +166,15 @@ public sealed class ClaimProcessor(
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseContentRead, timeoutCts.Token);
             var responseJson = await response.Content.ReadAsStringAsync(timeoutCts.Token);
             var statusCode = (int)response.StatusCode;
+
+            if (_options.ShouldLogPollPayloads())
+            {
+                logger.LogInformation(
+                    "APIM batch {BatchId} response. Status={StatusCode} Payload={Payload}",
+                    batchId,
+                    statusCode,
+                    responseJson);
+            }
 
             if (!response.IsSuccessStatusCode)
             {
@@ -153,6 +193,20 @@ public sealed class ClaimProcessor(
                         throw;
                     }
 
+                    await TryRecordHistoryAsync(
+                        () => requestHistoryStore.RecordApimResultAsync(
+                            batchId,
+                            correlationIds,
+                            "Buffered",
+                            statusCode,
+                            null,
+                            responseJson,
+                            $"Http{statusCode}",
+                            true,
+                            DateTimeOffset.UtcNow,
+                            cancellationToken),
+                        "retryable HTTP response");
+
                     CompleteTelemetry(operation.Telemetry, false, $"HTTP {statusCode}", stopwatch.ElapsedMilliseconds);
                     return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, $"Http{statusCode}", statusCode);
                 }
@@ -162,6 +216,20 @@ public sealed class ClaimProcessor(
                     batchId,
                     claims.Count,
                     statusCode);
+
+                await TryRecordHistoryAsync(
+                    () => requestHistoryStore.RecordApimResultAsync(
+                        batchId,
+                        correlationIds,
+                        "Alerted",
+                        statusCode,
+                        null,
+                        responseJson,
+                        $"Http{statusCode}",
+                        false,
+                        DateTimeOffset.UtcNow,
+                        cancellationToken),
+                    "non-retry HTTP response");
 
                 CompleteTelemetry(operation.Telemetry, false, $"HTTP {statusCode}", stopwatch.ElapsedMilliseconds);
                 return BuildResults(correlationIds, ClaimProcessingDisposition.Alerted, $"Http{statusCode}", statusCode);
@@ -183,6 +251,20 @@ public sealed class ClaimProcessor(
                     throw;
                 }
 
+                await TryRecordHistoryAsync(
+                    () => requestHistoryStore.RecordApimResultAsync(
+                        batchId,
+                        correlationIds,
+                        "Buffered",
+                        statusCode,
+                        businessCode,
+                        responseJson,
+                        $"JsonCode:{businessCode}",
+                        true,
+                        DateTimeOffset.UtcNow,
+                        cancellationToken),
+                    "JSON retry response");
+
                 CompleteTelemetry(operation.Telemetry, false, $"JSON {businessCode}", stopwatch.ElapsedMilliseconds);
                 return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "JsonRetryCode", statusCode, businessCode);
             }
@@ -192,6 +274,20 @@ public sealed class ClaimProcessor(
                 var writebackResults = await WriteBatchResultsAsync(responseJson, correlationIds, cancellationToken);
                 if (!writebackResults)
                 {
+                    await TryRecordHistoryAsync(
+                        () => requestHistoryStore.RecordApimResultAsync(
+                            batchId,
+                            correlationIds,
+                            "WritebackFailed",
+                            statusCode,
+                            businessCode,
+                            responseJson,
+                            "ResultWritebackFailed",
+                            false,
+                            DateTimeOffset.UtcNow,
+                            cancellationToken),
+                        "writeback failure");
+
                     CompleteTelemetry(operation.Telemetry, false, "WritebackFailed", stopwatch.ElapsedMilliseconds);
                     return BuildResults(correlationIds, ClaimProcessingDisposition.FailedWriteback, "ResultWritebackFailed", statusCode, businessCode);
                 }
@@ -214,9 +310,37 @@ public sealed class ClaimProcessor(
                     ["recordCount"] = claims.Count.ToString()
                 });
 
+                await TryRecordHistoryAsync(
+                    () => requestHistoryStore.RecordApimResultAsync(
+                        batchId,
+                        correlationIds,
+                        "Alerted",
+                        statusCode,
+                        businessCode,
+                        responseJson,
+                        "JsonAlertCode",
+                        false,
+                        DateTimeOffset.UtcNow,
+                        cancellationToken),
+                    "JSON alert response");
+
                 CompleteTelemetry(operation.Telemetry, true, $"JSON alert {businessCode}", stopwatch.ElapsedMilliseconds);
                 return BuildResults(correlationIds, ClaimProcessingDisposition.Alerted, "JsonAlertCode", statusCode, businessCode);
             }
+
+            await TryRecordHistoryAsync(
+                () => requestHistoryStore.RecordApimResultAsync(
+                    batchId,
+                    correlationIds,
+                    "Completed",
+                    statusCode,
+                    businessCode,
+                    responseJson,
+                    "BatchCompleted",
+                    false,
+                    DateTimeOffset.UtcNow,
+                    cancellationToken),
+                "successful APIM response");
 
             CompleteTelemetry(operation.Telemetry, true, "Completed", stopwatch.ElapsedMilliseconds);
             return BuildResults(correlationIds, ClaimProcessingDisposition.Completed, "BatchCompleted", statusCode, businessCode);
@@ -235,6 +359,20 @@ public sealed class ClaimProcessor(
                 outageTracker.RecordBufferFailure();
                 throw;
             }
+
+            await TryRecordHistoryAsync(
+                () => requestHistoryStore.RecordApimResultAsync(
+                    batchId,
+                    correlationIds,
+                    "Buffered",
+                    null,
+                    null,
+                    null,
+                    "ApimTimeout",
+                    true,
+                    DateTimeOffset.UtcNow,
+                    cancellationToken),
+                "APIM timeout");
 
             CompleteTelemetry(operation.Telemetry, false, "Timeout", stopwatch.ElapsedMilliseconds);
             return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "ApimTimeout");
@@ -255,6 +393,20 @@ public sealed class ClaimProcessor(
                 throw;
             }
 
+            await TryRecordHistoryAsync(
+                () => requestHistoryStore.RecordApimResultAsync(
+                    batchId,
+                    correlationIds,
+                    "Buffered",
+                    statusCode,
+                    null,
+                    null,
+                    "NetworkFailure",
+                    true,
+                    DateTimeOffset.UtcNow,
+                    cancellationToken),
+                "APIM network failure");
+
             logger.LogWarning(ex, "Network failure while processing APIM batch {BatchId}", batchId);
             CompleteTelemetry(operation.Telemetry, false, "NetworkFailure", stopwatch.ElapsedMilliseconds);
             return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "NetworkFailure", statusCode);
@@ -265,6 +417,18 @@ public sealed class ClaimProcessor(
             telemetry.TrackException(ex);
             CompleteTelemetry(operation.Telemetry, false, "InvalidJson", stopwatch.ElapsedMilliseconds);
             return BuildResults(correlationIds, ClaimProcessingDisposition.Alerted, "InvalidJsonResponse");
+        }
+    }
+
+    private async Task TryRecordHistoryAsync(Func<Task> action, string operation)
+    {
+        try
+        {
+            await action();
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Request history write failed during {Operation}", operation);
         }
     }
 

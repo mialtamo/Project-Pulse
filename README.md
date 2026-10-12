@@ -460,6 +460,22 @@ The landing page includes defensive headers such as:
 - Content Security Policy
 - no-cache headers
 
+### Request history dashboard
+
+```text
+GET /requests.html
+GET /requests
+GET /requests/{id}
+```
+
+The POC dashboard shows recent claim-processing history including timestamps, unique ID, status, APIM/Service Bus destination, HTTP status, business response code, and failure/buffer reason.
+
+Request metadata is stored in Azure Table Storage. Large APIM request and response payload bodies are stored in Blob Storage.
+
+When `LOG_POLL_PAYLOADS=true`, the dashboard can display the exact batch JSON sent to APIM and exact JSON/body received from APIM. When false, payloads are not persisted or exposed, but operational metadata remains available.
+
+The implementation uses `AzureWebJobsStorage` by default. `RequestHistoryStorageConnectionString` can optionally point the dashboard history at a separate storage account.
+
 ### Health endpoint
 
 ```text
@@ -534,6 +550,9 @@ to avoid placing claim payloads in application logs.
 | `POLL_SCHEDULE` | Yes | none | Timer NCRONTAB expression |
 | `PROJECT_PULSE_VERSION` | No | `0.0.0` on page | Landing-page version |
 | `PROJECT_PULSE_ENVIRONMENT` | No | `UNKNOWN` on page | Landing-page environment |
+| `RequestHistoryStorageConnectionString` | No | falls back to `AzureWebJobsStorage` | Optional separate storage for request history |
+| `RequestHistoryTableName` | No | `ProjectPulseRequestHistory` | Request-history metadata table |
+| `RequestHistoryBlobContainerName` | No | `projectpulse-history-payloads` | APIM payload-history container |
 
 ### RTA / App API
 
