@@ -221,7 +221,7 @@ load(); setInterval(load,30000);
 </script>
 </body>
 </html>
-"""
+""";
 
         await response.WriteStringAsync(html, Encoding.UTF8);
         return response;
