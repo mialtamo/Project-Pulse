@@ -27,6 +27,8 @@ public sealed class ClaimProcessorOptions
     public bool RtaStatusWritebackEnabled { get; init; } = false;
     public string AppApiMode { get; init; } = "RTA";
     public bool LogPollPayloads { get; init; } = false;
+    public string RequestHistoryTableName { get; init; } = "ProjectPulseRequestHistory";
+    public string RequestHistoryBlobContainerName { get; init; } = "projectpulse-history-payloads";
 
     [Required]
     public string ApimBaseUrl { get; init; } = string.Empty;
