@@ -10,7 +10,7 @@ public sealed class LandingPageFunction
 {
     [Function("PulseLandingPage")]
     public Task<HttpResponseData> RunRoot(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "/")]
         HttpRequestData request) =>
         RenderPageAsync(request);
 
