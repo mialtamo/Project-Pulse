@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -166,6 +167,37 @@ public sealed class ClaimProcessor(
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseContentRead, timeoutCts.Token);
             var responseJson = await response.Content.ReadAsStringAsync(timeoutCts.Token);
             var statusCode = (int)response.StatusCode;
+
+            if (!ValidateApimResponseToken(response, batchId))
+            {
+                await TryRecordHistoryAsync(
+                    () => requestHistoryStore.RecordApimResultAsync(
+                        batchId,
+                        correlationIds,
+                        "Rejected",
+                        statusCode,
+                        null,
+                        responseJson,
+                        "InvalidApimResponseToken",
+                        false,
+                        DateTimeOffset.UtcNow,
+                        cancellationToken),
+                    "APIM response-token rejection");
+
+                telemetry.TrackEvent("ApimResponseValidationFailed", new Dictionary<string, string>
+                {
+                    ["batchId"] = batchId,
+                    ["headerName"] = _options.ApimResponseHeaderName,
+                    ["recordCount"] = claims.Count.ToString()
+                });
+
+                CompleteTelemetry(operation.Telemetry, false, "InvalidApimResponseToken", stopwatch.ElapsedMilliseconds);
+                return BuildResults(
+                    correlationIds,
+                    ClaimProcessingDisposition.Alerted,
+                    "InvalidApimResponseToken",
+                    statusCode);
+            }
 
             if (_options.ShouldLogPollPayloads())
             {
@@ -507,6 +539,63 @@ public sealed class ClaimProcessor(
         return !string.IsNullOrWhiteSpace(value);
     }
 
+    private bool ValidateApimResponseToken(HttpResponseMessage response, string batchId)
+    {
+        if (string.IsNullOrWhiteSpace(_options.ApimResponseToken))
+        {
+            logger.LogError(
+                "APIM response validation failed for batch {BatchId}: ApimResponseToken is not configured.",
+                batchId);
+            return false;
+        }
+
+        if (!response.Headers.TryGetValues(_options.ApimResponseHeaderName, out var values))
+        {
+            logger.LogError(
+                "APIM response validation failed for batch {BatchId}: required header {HeaderName} was missing.",
+                batchId,
+                _options.ApimResponseHeaderName);
+            return false;
+        }
+
+        var actual = values.FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(actual))
+        {
+            logger.LogError(
+                "APIM response validation failed for batch {BatchId}: required header {HeaderName} was empty.",
+                batchId,
+                _options.ApimResponseHeaderName);
+            return false;
+        }
+
+        var expectedBytes = Encoding.UTF8.GetBytes(_options.ApimResponseToken);
+        var actualBytes = Encoding.UTF8.GetBytes(actual);
+        var valid = expectedBytes.Length == actualBytes.Length &&
+            CryptographicOperations.FixedTimeEquals(expectedBytes, actualBytes);
+
+        if (!valid)
+        {
+            logger.LogError(
+                "APIM response validation failed for batch {BatchId}: header {HeaderName} did not match the configured token.",
+                batchId,
+                _options.ApimResponseHeaderName);
+            return false;
+        }
+
+        logger.LogInformation(
+            "APIM response validation succeeded for batch {BatchId}. Header {HeaderName} was present and matched the configured token.",
+            batchId,
+            _options.ApimResponseHeaderName);
+
+        telemetry.TrackEvent("ApimResponseValidationSucceeded", new Dictionary<string, string>
+        {
+            ["batchId"] = batchId,
+            ["headerName"] = _options.ApimResponseHeaderName
+        });
+
+        return true;
+    }
+
     private async Task<bool> WriteBatchResultsAsync(
         string responseJson,
         IReadOnlyList<string> correlationIds,
@@ -537,16 +626,44 @@ public sealed class ClaimProcessor(
             return false;
         }
 
-        var success = true;
+        var expectedCorrelationIds = correlationIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var responseCorrelationIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var item in root.EnumerateArray())
         {
             if (!TryGetResponseCorrelationId(item, out var correlationId))
             {
-                logger.LogWarning("APIM response item did not contain a correlation ID. Writeback skipped for that item.");
-                success = false;
-                continue;
+                logger.LogWarning("APIM response item did not contain a correlation ID. Writeback rejected.");
+                return false;
             }
 
+            if (!expectedCorrelationIds.Contains(correlationId))
+            {
+                logger.LogError(
+                    "APIM response contained unexpected correlation ID {CorrelationId}. Writeback rejected.",
+                    correlationId);
+                return false;
+            }
+
+            if (!responseCorrelationIds.Add(correlationId))
+            {
+                logger.LogError(
+                    "APIM response contained duplicate correlation ID {CorrelationId}. Writeback rejected.",
+                    correlationId);
+                return false;
+            }
+        }
+
+        if (!expectedCorrelationIds.SetEquals(responseCorrelationIds))
+        {
+            logger.LogError("APIM response correlation IDs did not exactly match the submitted batch. Writeback rejected.");
+            return false;
+        }
+
+        var success = true;
+        foreach (var item in root.EnumerateArray())
+        {
+            TryGetResponseCorrelationId(item, out var correlationId);
             success &= await appApiClient.WriteStatusAsync(
                 correlationId,
                 item.GetRawText(),

@@ -111,6 +111,15 @@ Outage state is currently process-local.
 
 APIM POC response contract is an array with one response object per submitted claim.
 
+Before Project Pulse processes any adjudication response, it validates the configured APIM response header. Current POC values:
+
+```text
+ApimResponseHeaderName=X-Pulse-Response-Token
+ApimResponseToken=<same secret value as APIM named value rta-key>
+```
+
+The token value is never written to logs. Logs and telemetry record only whether validation succeeded or failed and the header name. Missing, empty, mismatched, or unconfigured tokens cause the response to be rejected before JSON business processing or RTA writeback.
+
 ## Current retry/failure behavior
 
 Default retry HTTP statuses:
@@ -159,7 +168,7 @@ Project Pulse expects APIM to return one response object per submitted claim in 
 
 `PUT /requests/{correlationId}/status`
 
-using the returned `CORRELATION_ID`. A response-count mismatch is treated as a writeback failure.
+using the returned `CORRELATION_ID`. A response-count mismatch is treated as a writeback failure. Project Pulse also requires the response correlation-ID set to exactly match the submitted batch and rejects unexpected or duplicate IDs before any writeback.
 
 ## Current POC mock API
 
@@ -193,6 +202,8 @@ RtaDbHealthPath=/health
 CorrelationIdField=CORRELATION_ID
 APIM_OUTAGE_MODE=BUFFER_THEN_STOP
 APIM_OUTAGE_POLL_STOP_SECONDS=300
+ApimResponseHeaderName=X-Pulse-Response-Token
+ApimResponseToken=<same secret as APIM rta-key>
 ```
 
 For real claim data, `LOG_POLL_PAYLOADS` must be false.

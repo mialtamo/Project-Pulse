@@ -22,6 +22,8 @@
     "ApimAdjudicationPath": "/claims/adjudicate",
     "ApimRequestTimeoutSeconds": "15",
     "ApimScope": "api://YOUR-APIM-PROTECTED-API-APP-ID/.default",
+    "ApimResponseHeaderName": "X-Pulse-Response-Token",
+    "ApimResponseToken": "SET_TO_THE_SAME_SECRET_AS_APIM_RTA_KEY",
     "ApimBatchRootProperty": "claims",
     "ApimFieldMapping": "{\"correlationId\":\"CORRELATION_ID\",\"requestId\":\"REQUEST_ID\",\"idempotencyKey\":\"IDEMPOTENCY_KEY\",\"requestType\":\"REQUEST_TYPE\",\"patientIcn\":\"METADATA.PATIENT_ICN\",\"sponsorIcn\":\"METADATA.SPONSOR_ICN\",\"startDateOfService\":\"METADATA.START_DATE_OF_SERVICE\",\"endDateOfService\":\"METADATA.END_DATE_OF_SERVICE\",\"program\":\"METADATA.PROGRAM\",\"includeAdjustmentDetails\":\"METADATA.INCLUDE_ADJUSTMENT_DETAILS\"}",
     "CorrelationIdField": "CORRELATION_ID",
