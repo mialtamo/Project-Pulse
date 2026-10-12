@@ -93,7 +93,7 @@ tr.data-row:hover{background:#0f1a27}
 td.id{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tag{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;border:1px solid #29445f;white-space:nowrap}
 .tag.APIM{color:var(--green)}.tag.ServiceBus{color:var(--amber)}
-.status-Completed{color:var(--green)}.status-Buffered{color:var(--amber)}.status-Alerted,.status-WritebackFailed{color:var(--red)}
+.status-Completed{color:var(--green)}.status-Buffered{color:var(--amber)}.status-Alerted,.status-WritebackFailed,.status-Rejected{color:var(--red)}
 .expand-row{display:none;background:#07101a}.expand-row.open{display:table-row}
 .expand-cell{padding:16px}
 .detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:14px}
