@@ -9,30 +9,26 @@ namespace ProjectPulse.Processor.Functions;
 public sealed class LandingPageFunction
 {
     [Function("PulseLandingPage")]
-    public async Task<HttpResponseData> Run(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "{*path}")]
-        HttpRequestData request,
-        string? path)
+    public Task<HttpResponseData> RunRoot(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "")]
+        HttpRequestData request) =>
+        RenderPageAsync(request);
+
+    [Function("PulseLandingAlias")]
+    public Task<HttpResponseData> RunPulse(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse")]
+        HttpRequestData request) =>
+        RenderPageAsync(request);
+
+    [Function("PulseLogo")]
+    public Task<HttpResponseData> RunLogo(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "pulse-logo")]
+        HttpRequestData request) =>
+        ServeLogoAsync(request);
+
+    private static async Task<HttpResponseData> RenderPageAsync(
+        HttpRequestData request)
     {
-        var normalizedPath = (path ?? string.Empty).Trim('/');
-
-        // Serve logo directly through the same catch-all route.
-        if (normalizedPath.Equals(
-            "pulse-logo",
-            StringComparison.OrdinalIgnoreCase))
-        {
-            return await ServeLogoAsync(request);
-        }
-
-        // Only root and /pulse render the landing page.
-        if (!string.IsNullOrEmpty(normalizedPath) &&
-            !normalizedPath.Equals(
-                "pulse",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return request.CreateResponse(HttpStatusCode.NotFound);
-        }
-
         var version = WebUtility.HtmlEncode(
             Environment.GetEnvironmentVariable("PROJECT_PULSE_VERSION") ?? "0.0.0");
 
