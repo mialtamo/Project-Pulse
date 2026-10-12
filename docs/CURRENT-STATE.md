@@ -84,6 +84,9 @@ Recommended configuration:
 ```text
 APIM_OUTAGE_MODE=BUFFER_THEN_STOP
 APIM_OUTAGE_POLL_STOP_SECONDS=300
+RtaStatusPathTemplate=/requests/{correlationId}/status
+RtaStatusWritebackEnabled=true
+JsonResponseCodeField=RESPONSE_CODE
 ```
 
 Behavior:
@@ -106,7 +109,7 @@ Outage state is currently process-local.
 - Batch-level `Idempotency-Key`.
 - `X-Pulse-Record-Count` header.
 
-Final APIM response contract is not yet established.
+APIM POC response contract is an array with one response object per submitted claim.
 
 ## Current retry/failure behavior
 
@@ -150,9 +153,13 @@ Duplicate messages are currently possible when the mock source exposes the same 
 
 ## Current writeback
 
-`RtaStatusWritebackEnabled=false`
+`RtaStatusWritebackEnabled=true` for the current POC.
 
-Writeback code exists but is provisional because the final APIM response contract is not yet confirmed.
+Project Pulse expects APIM to return one response object per submitted claim in a JSON array. Each item is written back with:
+
+`PUT /requests/{correlationId}/status`
+
+using the returned `CORRELATION_ID`. A response-count mismatch is treated as a writeback failure.
 
 ## Current POC mock API
 
@@ -183,7 +190,7 @@ LOG_POLL_PAYLOADS=true
 RtaQueuedPath=/claims/pending
 RtaHealthPath=/health
 RtaDbHealthPath=/health
-CorrelationIdField=uniqueId
+CorrelationIdField=CORRELATION_ID
 APIM_OUTAGE_MODE=BUFFER_THEN_STOP
 APIM_OUTAGE_POLL_STOP_SECONDS=300
 ```
@@ -209,8 +216,6 @@ App API/APIM token access depends on configured Entra scopes.
 - `/pulse-health` is anonymous.
 - Service Bus health only validates TCP connectivity.
 - No dedicated automated test project yet.
-- Final APIM response contract is not established.
-- Final RTA writeback behavior is not enabled.
 - Recovery processor does not exist yet.
 - High-throughput production architecture has not been load-tested.
 
@@ -255,4 +260,4 @@ The request-history persistence is intentionally best-effort. A history-storage 
 
 ## Next milestone
 
-M1 - APIM Mock Adjudication.
+M2 - Complete Success Path and RTA Writeback.

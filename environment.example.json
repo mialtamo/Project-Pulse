@@ -23,7 +23,7 @@
     "RtaHealthPath": "/healthchecks",
     "RtaDbHealthPath": "/healthchecks/db/app",
     "RtaStatusPathTemplate": "/requests/{correlationId}/status",
-    "RtaStatusWritebackEnabled": "false"
+    "RtaStatusWritebackEnabled": "true"
   },
   "APIM": {
     "ApimBaseUrl": "https://claims-api.example.com",
@@ -41,7 +41,7 @@
   },
   "RetryPolicy": {
     "RetryHttpStatusCodes": "404,408,429,500,502,503,504",
-    "JsonResponseCodeField": "ResponseCode",
+    "JsonResponseCodeField": "RESPONSE_CODE",
     "JsonRetryCodes": "",
     "JsonAlertCodes": "419",
     "ResultWriteMaxAttempts": "3",

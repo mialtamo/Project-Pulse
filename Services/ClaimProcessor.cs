@@ -524,7 +524,16 @@ public sealed class ClaimProcessor(
         if (root.ValueKind != JsonValueKind.Array)
         {
             logger.LogWarning(
-                "RTA writeback is enabled but APIM response contract is not yet an array. Writeback skipped until the final APIM contract is known.");
+                "RTA writeback is enabled but APIM response was not an array.");
+            return false;
+        }
+
+        if (root.GetArrayLength() != correlationIds.Count)
+        {
+            logger.LogWarning(
+                "APIM response item count {ResponseCount} did not match submitted batch count {SubmittedCount}",
+                root.GetArrayLength(),
+                correlationIds.Count);
             return false;
         }
 
@@ -542,14 +551,6 @@ public sealed class ClaimProcessor(
                 correlationId,
                 item.GetRawText(),
                 cancellationToken);
-        }
-
-        if (root.GetArrayLength() != correlationIds.Count)
-        {
-            logger.LogWarning(
-                "APIM response item count {ResponseCount} did not match submitted batch count {SubmittedCount}",
-                root.GetArrayLength(),
-                correlationIds.Count);
         }
 
         return success;
@@ -584,8 +585,37 @@ public sealed class ClaimProcessor(
         }
 
         using var document = JsonDocument.Parse(json);
-        if (document.RootElement.ValueKind != JsonValueKind.Object ||
-            !document.RootElement.TryGetProperty(_options.JsonResponseCodeField, out var value))
+        var root = document.RootElement;
+
+        if (root.ValueKind == JsonValueKind.Object)
+        {
+            return TryGetBusinessCodeValue(root);
+        }
+
+        if (root.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var codes = root
+            .EnumerateArray()
+            .Select(TryGetBusinessCodeValue)
+            .Where(code => !string.IsNullOrWhiteSpace(code))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return codes.Length switch
+        {
+            0 => null,
+            1 => codes[0],
+            _ => "MIXED"
+        };
+    }
+
+    private string? TryGetBusinessCodeValue(JsonElement item)
+    {
+        if (item.ValueKind != JsonValueKind.Object ||
+            !item.TryGetProperty(_options.JsonResponseCodeField, out var value))
         {
             return null;
         }

@@ -59,7 +59,7 @@ public sealed class ClaimProcessorOptions
     """;
 
     public string RetryHttpStatusCodes { get; init; } = "404,408,429,500,502,503,504";
-    public string JsonResponseCodeField { get; init; } = "ResponseCode";
+    public string JsonResponseCodeField { get; init; } = "RESPONSE_CODE";
     public string JsonRetryCodes { get; init; } = string.Empty;
     public string JsonAlertCodes { get; init; } = "419";
 
