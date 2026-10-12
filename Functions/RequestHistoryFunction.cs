@@ -191,12 +191,14 @@ function filtered(){
 function renderSummary(list){
   const apim=list.filter(x=>x.Destination==='APIM').length, sb=list.filter(x=>x.Destination==='ServiceBus').length;
   const completed=list.filter(x=>x.Status==='Completed').length, buffered=list.filter(x=>x.Status==='Buffered').length;
+  const rejected=list.filter(x=>x.Status==='Rejected').length;
   document.getElementById('summary').innerHTML=
     '<span class="pill">'+list.length+' batch(es) visible</span>'+
     '<span class="pill">'+apim+' APIM</span>'+
     '<span class="pill">'+sb+' Service Bus</span>'+
     '<span class="pill">'+completed+' completed</span>'+
-    '<span class="pill">'+buffered+' buffered</span>';
+    '<span class="pill">'+buffered+' buffered</span>'+
+    '<span class="pill">'+rejected+' rejected</span>';
 }
 function render(){
   const list=filtered(); renderSummary(list);
@@ -222,7 +224,11 @@ async function toggleDetail(rowId,recordId){
   if(!opening)return; row.classList.add('open');
   let x=detailCache.get(recordId);
   if(!x){const r=await fetch('/requests/'+encodeURIComponent(recordId),{cache:'no-store'});if(!r.ok){row.querySelector('td').innerHTML='<div class="payload-note">Could not load request details.</div>';return}x=await r.json();detailCache.set(recordId,x)}
+  const validationFailure=x.Status==='Rejected'&&x.Reason==='InvalidApimResponseToken'
+    ? '<div class="payload-note"><strong>APIM response rejected:</strong> response-token validation failed. The response was not processed and no RTA writeback was attempted.</div><br>'
+    : '';
   row.querySelector('td').innerHTML=
+    validationFailure+
     '<div class="detail-grid">'+
       '<div class="card"><div class="label">Batch ID</div><div class="id">'+esc(x.BatchId)+'</div></div>'+
       '<div class="card"><div class="label">Claims in Batch</div>'+esc(groupByBatch(items).find(b=>b.BatchId===x.BatchId)?.ClaimCount??1)+'</div>'+
