@@ -105,6 +105,15 @@ public sealed class ClaimProcessor(
                 throw;
             }
 
+            await TryRecordHistoryAsync(
+                () => requestHistoryStore.RecordServiceBusAsync(
+                    batchId,
+                    correlationIds,
+                    "OutboundCircuitOpen",
+                    DateTimeOffset.UtcNow,
+                    cancellationToken),
+                "circuit-open service bus buffer");
+
             CompleteTelemetry(operation.Telemetry, false, "CircuitOpen", stopwatch.ElapsedMilliseconds);
             return BuildResults(correlationIds, ClaimProcessingDisposition.QueuedForRetry, "OutboundCircuitOpen");
         }
