@@ -187,21 +187,18 @@ public sealed class AzureStorageRequestHistoryStore : IRequestHistoryStore
         await EnsureInitializedAsync(cancellationToken);
 
         var results = new List<RequestHistoryEntity>();
+
         await foreach (var entity in _table.QueryAsync<RequestHistoryEntity>(
             x => x.PartitionKey == PartitionKeyValue,
-            maxPerPage: Math.Clamp(limit * 3, 25, 300),
+            maxPerPage: 1000,
             cancellationToken: cancellationToken))
         {
             results.Add(entity);
-            if (results.Count >= Math.Clamp(limit * 3, 25, 300))
-            {
-                break;
-            }
         }
 
         return results
             .OrderByDescending(x => x.UpdatedAtUtc)
-            .Take(Math.Clamp(limit, 1, 100))
+            .Take(Math.Clamp(limit, 1, 1000))
             .Select(x => Map(x, null, null))
             .ToArray();
     }
