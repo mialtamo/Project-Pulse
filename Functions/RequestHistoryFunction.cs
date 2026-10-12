@@ -218,6 +218,21 @@ function render(){
       '<tr id="'+key+'" class="expand-row"><td colspan="8" class="expand-cell"><div class="muted">Loading details...</div></td></tr>';
   }).join('');
 }
+function writebackReasonText(reason){
+  const messages={
+    EmptyApimResponse:'APIM returned an empty response body.',
+    InvalidApimResponseShape:'APIM response was not the expected JSON array.',
+    ApimResponseCountMismatch:'APIM returned a different number of results than the submitted claim count.',
+    MissingCorrelationId:'At least one APIM response item did not contain a correlation ID.',
+    UnexpectedCorrelationId:'APIM returned a correlation ID that was not part of the submitted batch.',
+    DuplicateCorrelationId:'APIM returned the same correlation ID more than once in the batch.',
+    CorrelationIdSetMismatch:'The returned correlation-ID set did not exactly match the submitted batch.',
+    RtaStatusWritebackFailed:'The RTA status PUT failed after APIM response validation succeeded.',
+    ResultWritebackFailed:'RTA result writeback failed. This older record did not capture a more specific cause.'
+  };
+  return messages[reason]||('Writeback failed: '+(reason||'Unknown reason'));
+}
+
 async function toggleDetail(rowId,recordId){
   const row=document.getElementById(rowId); const opening=!row.classList.contains('open');
   document.querySelectorAll('.expand-row.open').forEach(r=>r.classList.remove('open'));
@@ -227,8 +242,12 @@ async function toggleDetail(rowId,recordId){
   const validationFailure=x.Status==='Rejected'&&x.Reason==='InvalidApimResponseToken'
     ? '<div class="payload-note"><strong>APIM response rejected:</strong> response-token validation failed. The response was not processed and no RTA writeback was attempted.</div><br>'
     : '';
+  const writebackFailure=x.Status==='WritebackFailed'
+    ? '<div class="payload-note"><strong>Writeback failed:</strong> '+esc(writebackReasonText(x.Reason))+'</div><br>'
+    : '';
   row.querySelector('td').innerHTML=
     validationFailure+
+    writebackFailure+
     '<div class="detail-grid">'+
       '<div class="card"><div class="label">Batch ID</div><div class="id">'+esc(x.BatchId)+'</div></div>'+
       '<div class="card"><div class="label">Claims in Batch</div>'+esc(groupByBatch(items).find(b=>b.BatchId===x.BatchId)?.ClaimCount??1)+'</div>'+
