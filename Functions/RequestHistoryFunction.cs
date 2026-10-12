@@ -130,6 +130,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#020407;borde
     <table>
       <thead><tr>
         <th data-key="UpdatedAtUtc">Updated ↕</th>
+        <th data-key="ClaimCount">Claims ↕</th>
         <th data-key="UniqueId">Unique ID ↕</th>
         <th data-key="Status">Status ↕</th>
         <th data-key="Destination">Destination ↕</th>
@@ -143,6 +144,26 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#020407;borde
 </main>
 <script>
 let items=[]; let sortKey='UpdatedAtUtc'; let sortDir='desc'; const detailCache=new Map();
+
+function groupByBatch(source){
+  const groups=new Map();
+  for(const item of source){
+    const key=item.BatchId||item.RecordId;
+    if(!groups.has(key))groups.set(key,[]);
+    groups.get(key).push(item);
+  }
+
+  return Array.from(groups.values()).map(group=>{
+    const representative=group.slice().sort((a,b)=>Date.parse(b.UpdatedAtUtc||0)-Date.parse(a.UpdatedAtUtc||0))[0];
+    const uniqueIds=[...new Set(group.map(x=>x.UniqueId).filter(Boolean))];
+    return {
+      ...representative,
+      ClaimCount:group.length,
+      UniqueId:uniqueIds.length===1?uniqueIds[0]:uniqueIds.join(', '),
+      RecordId:representative.RecordId
+    };
+  });
+}
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function syntaxHighlight(value){
   if(value===null||value===undefined||value==='') return '<span class="muted">No payload recorded</span>';
@@ -158,20 +179,20 @@ function syntaxHighlight(value){
 function compare(a,b){
   let av=a?.[sortKey], bv=b?.[sortKey];
   if(sortKey==='UpdatedAtUtc'){av=Date.parse(av||0);bv=Date.parse(bv||0)}
-  else if(sortKey==='HttpStatusCode'){av=Number(av??-1);bv=Number(bv??-1)}
+  else if(sortKey==='HttpStatusCode'||sortKey==='ClaimCount'){av=Number(av??-1);bv=Number(bv??-1)}
   else{av=String(av??'').toLowerCase();bv=String(bv??'').toLowerCase()}
   if(av<bv)return sortDir==='asc'?-1:1;if(av>bv)return sortDir==='asc'?1:-1;return 0;
 }
 function filtered(){
   const q=document.getElementById('search').value.trim().toLowerCase();
   const dest=document.getElementById('destination').value;
-  return items.filter(x=>(!dest||x.Destination===dest)&&(!q||[x.UniqueId,x.Status,x.Destination,x.HttpStatusCode,x.BusinessResponseCode,x.Reason,x.BatchId].some(v=>String(v??'').toLowerCase().includes(q)))).sort(compare);
+  return groupByBatch(items).filter(x=>(!dest||x.Destination===dest)&&(!q||[x.UniqueId,x.Status,x.Destination,x.HttpStatusCode,x.BusinessResponseCode,x.Reason,x.BatchId,x.ClaimCount].some(v=>String(v??'').toLowerCase().includes(q)))).sort(compare);
 }
 function renderSummary(list){
   const apim=list.filter(x=>x.Destination==='APIM').length, sb=list.filter(x=>x.Destination==='ServiceBus').length;
   const completed=list.filter(x=>x.Status==='Completed').length, buffered=list.filter(x=>x.Status==='Buffered').length;
   document.getElementById('summary').innerHTML=
-    '<span class="pill">'+list.length+' visible</span>'+
+    '<span class="pill">'+list.length+' batch(es) visible</span>'+
     '<span class="pill">'+apim+' APIM</span>'+
     '<span class="pill">'+sb+' Service Bus</span>'+
     '<span class="pill">'+completed+' completed</span>'+
@@ -180,18 +201,19 @@ function renderSummary(list){
 function render(){
   const list=filtered(); renderSummary(list);
   const tbody=document.getElementById('rows');
-  if(!list.length){tbody.innerHTML='<tr><td colspan="7" class="empty">No matching requests</td></tr>';return}
+  if(!list.length){tbody.innerHTML='<tr><td colspan="8" class="empty">No matching requests</td></tr>';return}
   tbody.innerHTML=list.map((x,i)=>{
     const key='row-'+i+'-'+esc(x.RecordId);
     return '<tr class="data-row" onclick="toggleDetail(\''+key+'\',\''+esc(x.RecordId)+'\')">'+
       '<td>'+new Date(x.UpdatedAtUtc).toLocaleString()+'</td>'+
+      '<td>'+esc(x.ClaimCount)+'</td>'+
       '<td class="id" title="'+esc(x.UniqueId)+'">'+esc(x.UniqueId)+'</td>'+
       '<td class="status-'+esc(x.Status)+'">'+esc(x.Status)+'</td>'+
       '<td><span class="tag '+esc(x.Destination)+'">'+esc(x.Destination)+'</span></td>'+
       '<td>'+esc(x.HttpStatusCode??'')+'</td>'+
       '<td>'+esc(x.BusinessResponseCode??'')+'</td>'+
       '<td>'+esc(x.Reason??'')+'</td></tr>'+
-      '<tr id="'+key+'" class="expand-row"><td colspan="7" class="expand-cell"><div class="muted">Loading details...</div></td></tr>';
+      '<tr id="'+key+'" class="expand-row"><td colspan="8" class="expand-cell"><div class="muted">Loading details...</div></td></tr>';
   }).join('');
 }
 async function toggleDetail(rowId,recordId){
@@ -203,6 +225,7 @@ async function toggleDetail(rowId,recordId){
   row.querySelector('td').innerHTML=
     '<div class="detail-grid">'+
       '<div class="card"><div class="label">Batch ID</div><div class="id">'+esc(x.BatchId)+'</div></div>'+
+      '<div class="card"><div class="label">Claims in Batch</div>'+esc(groupByBatch(items).find(b=>b.BatchId===x.BatchId)?.ClaimCount??1)+'</div>'+
       '<div class="card"><div class="label">Sent to APIM</div>'+(x.SentToApimAtUtc?new Date(x.SentToApimAtUtc).toLocaleString():'N/A')+'</div>'+
       '<div class="card"><div class="label">APIM Response</div>'+(x.ApimResponseAtUtc?new Date(x.ApimResponseAtUtc).toLocaleString():'N/A')+'</div>'+
       '<div class="card"><div class="label">Service Bus</div>'+(x.BufferedToServiceBusAtUtc?new Date(x.BufferedToServiceBusAtUtc).toLocaleString():'N/A')+'</div>'+
@@ -214,7 +237,7 @@ async function toggleDetail(rowId,recordId){
 async function load(){
   document.getElementById('status').textContent='Loading...'; detailCache.clear();
   const r=await fetch('/requests',{cache:'no-store'}); items=await r.json();
-  document.getElementById('status').textContent=items.length+' request(s) loaded'; render();
+  document.getElementById('status').textContent=groupByBatch(items).length+' batch(es) loaded from '+items.length+' claim record(s)'; render();
 }
 document.querySelectorAll('th[data-key]').forEach(th=>th.addEventListener('click',()=>{const k=th.dataset.key;if(sortKey===k)sortDir=sortDir==='asc'?'desc':'asc';else{sortKey=k;sortDir='asc'}render()}));
 load(); setInterval(load,30000);
