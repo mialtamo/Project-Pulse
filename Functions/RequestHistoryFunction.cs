@@ -15,7 +15,7 @@ public sealed class RequestHistoryFunction(IRequestHistoryStore historyStore)
         HttpRequestData request,
         CancellationToken cancellationToken)
     {
-        var limit = 100;
+        var limit = 1000;
         var items = await historyStore.ListAsync(limit, cancellationToken);
         var response = request.CreateResponse(HttpStatusCode.OK);
         response.Headers.Add("Content-Type", "application/json");
