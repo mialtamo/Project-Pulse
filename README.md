@@ -1,5 +1,19 @@
 # Project Pulse
 
+## Disclaimer and license
+
+Project Pulse is an experimental proof-of-concept and reference implementation. It is not an officially supported product or service.
+
+This software is provided "AS IS", without warranty of any kind, express or implied. No support, maintenance, service-level commitment, or obligation to correct defects is provided.
+
+Use of this software is entirely at your own risk. You are solely responsible for evaluating its suitability, security, configuration, compliance, and use in any environment, including production environments.
+
+To the maximum extent permitted by applicable law, the authors and contributors shall not be liable for any claim, damages, loss, security incident, data loss, service interruption, or other liability arising from the use of or inability to use this software.
+
+Use, modification, distribution, or deployment of this software does not create any support obligation, warranty, or representation that the software is suitable for any particular purpose.
+
+Project Pulse is licensed under the MIT License. See [LICENSE](LICENSE) for the complete license terms.
+
 Project Pulse is a .NET 10 isolated Azure Functions application that polls an internal request API, transforms queued claim requests, sends them to APIM for adjudication, and buffers work to Azure Service Bus when APIM is unavailable.
 
 This README documents the behavior of the current `main` build.
